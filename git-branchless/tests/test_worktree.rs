@@ -197,6 +197,10 @@ fn test_wt_list_uses_smartlog_for_worktrees() -> eyre::Result<()> {
     let (stdout, _stderr) = git.run(&["wt", "list"])?;
     assert!(stdout.contains(&test1_oid.to_string()[..7]), "stdout was: {stdout}");
     assert!(stdout.contains("(⎇ side)"), "stdout was: {stdout}");
+    assert!(
+        !stdout.contains("omitted"),
+        "wt list should only show checked-out worktree heads: {stdout}"
+    );
 
     Ok(())
 }

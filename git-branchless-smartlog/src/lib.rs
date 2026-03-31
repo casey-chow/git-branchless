@@ -162,19 +162,24 @@ mod graph {
         repo: &'repo Repo,
         dag: &Dag,
         commits: &CommitSet,
+        include_related_commits: bool,
     ) -> eyre::Result<SmartlogGraph<'repo>> {
         let commits_include_main =
             !dag.set_is_empty(&dag.main_branch_commit.intersection(commits))?;
         let mut graph: HashMap<NonZeroOid, Node> = {
             let mut result = HashMap::new();
             for vertex in dag.commit_set_to_vec(commits)? {
-                let vertex = CommitSet::from(vertex);
-                let merge_bases = if commits_include_main {
-                    dag.query_gca_all(dag.main_branch_commit.union(&vertex))?
+                let vertices = if include_related_commits {
+                    let vertex = CommitSet::from(vertex);
+                    let merge_bases = if commits_include_main {
+                        dag.query_gca_all(dag.main_branch_commit.union(&vertex))?
+                    } else {
+                        dag.query_gca_all(commits.union(&vertex))?
+                    };
+                    vertex.union(&merge_bases)
                 } else {
-                    dag.query_gca_all(commits.union(&vertex))?
+                    CommitSet::from(vertex)
                 };
-                let vertices = vertex.union(&merge_bases);
 
                 for oid in dag.commit_set_to_vec(&vertices)? {
                     let object = match repo.find_commit(oid)? {
@@ -347,6 +352,7 @@ mod graph {
         event_cursor: EventCursor,
         commits: &CommitSet,
         exact: bool,
+        include_related_commits: bool,
     ) -> eyre::Result<SmartlogGraph<'repo>> {
         let (effects, _progress) = effects.start_operation(OperationType::MakeGraph);
 
@@ -366,7 +372,7 @@ mod graph {
                 mark_commit_reachable(repo, oid)?;
             }
 
-            build_graph(&effects, repo, dag, &commits)?
+            build_graph(&effects, repo, dag, &commits, include_related_commits)?
         };
         sort_children(&mut graph);
         Ok(graph)
@@ -754,6 +760,9 @@ mod render {
 
         /// Normally HEAD and the main branch are included. Set this to exclude them.
         pub exact: bool,
+
+        /// Whether to include merge-base and ancestry context around the selected commits.
+        pub include_related_commits: bool,
     }
 }
 
@@ -770,6 +779,7 @@ pub fn smartlog(
         resolve_revset_options,
         reverse,
         exact,
+        include_related_commits,
     } = options;
 
     let repo = Repo::from_dir(&git_run_info.working_directory)?;
@@ -839,6 +849,7 @@ pub fn smartlog(
         event_cursor,
         &commits,
         exact,
+        include_related_commits,
     )?;
 
     let reverse = if reverse {
@@ -955,6 +966,7 @@ pub fn command_main(ctx: CommandContext, args: SmartlogArgs) -> EyreExitOr<()> {
             resolve_revset_options,
             reverse,
             exact,
+            include_related_commits: true,
         },
     )
 }

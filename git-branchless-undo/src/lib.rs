@@ -85,6 +85,7 @@ fn render_cursor_smartlog(
         event_cursor,
         &commits,
         false,
+        true,
     )?;
     let result = render_graph(
         effects,

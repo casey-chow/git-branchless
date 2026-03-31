@@ -611,6 +611,7 @@ fn list_worktrees(effects: &Effects, git_run_info: &GitRunInfo) -> EyreExitOr<()
             resolve_revset_options: ResolveRevsetOptions::default(),
             reverse: false,
             exact: true,
+            include_related_commits: false,
         },
     )
 }
