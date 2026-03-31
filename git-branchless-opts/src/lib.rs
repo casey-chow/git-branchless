@@ -472,6 +472,14 @@ pub enum WorktreeSubcommand {
         #[clap(value_parser, short = 'b', long = "branch")]
         new_branch: Option<String>,
 
+        /// Print a shell-ready `cd` command for the created worktree.
+        #[clap(action, long = "cd", overrides_with = "no_cd")]
+        cd: bool,
+
+        /// Do not print a shell-ready `cd` command for the created worktree.
+        #[clap(action, long = "no-cd", overrides_with = "cd")]
+        no_cd: bool,
+
         /// The worktree name to create under the configured worktree root.
         #[clap(value_parser)]
         name: String,

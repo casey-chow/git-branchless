@@ -1,5 +1,5 @@
-use lib::testing::pty::{PtyAction, run_in_pty};
-use lib::testing::{GitRunOptions, make_git, make_git_worktree};
+use lib::testing::pty::{run_in_pty, PtyAction};
+use lib::testing::{make_git, make_git_worktree, GitRunOptions};
 use std::process::Command;
 
 const CARRIAGE_RETURN: &str = "\r";
@@ -32,17 +32,27 @@ fn test_worktree_add_marks_detached_worktree_in_smartlog() -> eyre::Result<()> {
     let test1_oid = git.commit_file("test1", 1)?;
     git.run(&["checkout", "master"])?;
 
-    git.branchless(
-        "worktree",
-        &["add", "side", &test1_oid.to_string()],
-    )?;
+    git.branchless("worktree", &["add", "side", &test1_oid.to_string()])?;
 
     let stdout = git.smartlog()?;
-    assert!(
-        stdout.contains("(⎇ side)"),
-        "smartlog output was: {stdout}"
-    );
+    assert!(stdout.contains("(⎇ side)"), "smartlog output was: {stdout}");
     assert!(stdout.contains(&test1_oid.to_string()[..7]));
+
+    Ok(())
+}
+
+#[test]
+fn test_worktree_add_resolves_revset_target_before_calling_git() -> eyre::Result<()> {
+    let git = make_git()?;
+    git.init_repo()?;
+    let _worktree_root = set_worktree_root(&git)?;
+
+    let master_oid = git.get_repo()?.get_head_info()?.oid.unwrap();
+    git.branchless("worktree", &["add", "side", "heads(branches())"])?;
+
+    let stdout = git.smartlog()?;
+    assert!(stdout.contains("side"), "smartlog output was: {stdout}");
+    assert!(stdout.contains(&master_oid.to_string()[..7]));
 
     Ok(())
 }
@@ -116,6 +126,7 @@ fn test_wt_add_create_sanitizes_worktree_name() -> eyre::Result<()> {
     let (stdout, _stderr) = git.run(&["wt", "add", "feature/topic", "topic"])?;
     assert!(stdout.contains("Created worktree at:"));
     assert!(stdout.contains("feature-topic"));
+    assert!(!stdout.contains("\ncd '"), "stdout was: {stdout}");
 
     let (stdout, _stderr) = git.run(&["worktree", "list", "--porcelain"])?;
     assert!(stdout.contains("branch refs/heads/topic"));
@@ -205,10 +216,7 @@ fn test_wt_finish_resolves_worktree_path() -> eyre::Result<()> {
         .join("manual-reload");
     let worktree_path = worktree_path.to_string_lossy().to_string();
     let (stdout, _stderr) = git.run(&["wt", "finish", &worktree_path])?;
-    assert!(
-        stdout.contains("Finished worktree"),
-        "stdout was: {stdout}"
-    );
+    assert!(stdout.contains("Finished worktree"), "stdout was: {stdout}");
 
     Ok(())
 }
@@ -230,18 +238,12 @@ fn test_wt_finish_outputs_cd_command_when_finishing_current_worktree() -> eyre::
         .output()?;
     assert!(output.status.success(), "output was: {output:?}");
     let stdout = String::from_utf8(output.stdout)?;
-    let expected_cd_command = format!(
-        "cd '{}/'\n",
-        expected_main_worktree_path.to_string_lossy()
-    );
+    let expected_cd_command = format!("cd '{}/'\n", expected_main_worktree_path.to_string_lossy());
     assert!(
         stdout.starts_with(&expected_cd_command),
         "stdout was: {stdout}"
     );
-    assert!(
-        stdout.contains("Finished worktree"),
-        "stdout was: {stdout}"
-    );
+    assert!(stdout.contains("Finished worktree"), "stdout was: {stdout}");
     assert!(!worktree.repo_path.exists());
 
     Ok(())
@@ -259,7 +261,10 @@ fn test_wt_list_uses_smartlog_for_worktrees() -> eyre::Result<()> {
     git.run(&["wt", "add", "side", &test1_oid.to_string()])?;
 
     let (stdout, _stderr) = git.run(&["wt", "list"])?;
-    assert!(stdout.contains(&test1_oid.to_string()[..7]), "stdout was: {stdout}");
+    assert!(
+        stdout.contains(&test1_oid.to_string()[..7]),
+        "stdout was: {stdout}"
+    );
     assert!(stdout.contains("test-worktrees"), "stdout was: {stdout}");
     assert!(stdout.contains("⎇ side"), "stdout was: {stdout}");
     assert!(stdout.contains("create test1.txt"), "stdout was: {stdout}");
@@ -299,6 +304,75 @@ fn test_wt_add_runs_post_create_hook_from_config() -> eyre::Result<()> {
         recorded_pwd.trim_end(),
         canonical_worktree_path.to_string_lossy()
     );
+
+    Ok(())
+}
+
+#[test]
+fn test_wt_add_outputs_cd_command_with_flag() -> eyre::Result<()> {
+    let git = make_git()?;
+    git.init_repo()?;
+    let _worktree_root = set_worktree_root(&git)?;
+
+    let (stdout, _stderr) = git.run(&["wt", "add", "--cd", "topic-wt"])?;
+    assert!(
+        stdout.contains("Created worktree at:"),
+        "stdout was: {stdout}"
+    );
+    assert!(stdout.contains("\ncd '"), "stdout was: {stdout}");
+    assert!(stdout.contains("topic-wt"), "stdout was: {stdout}");
+
+    Ok(())
+}
+
+#[test]
+fn test_wt_add_outputs_cd_command_with_config() -> eyre::Result<()> {
+    let git = make_git()?;
+    git.init_repo()?;
+    let _worktree_root = set_worktree_root(&git)?;
+    git.run(&["config", "branchless.worktree.add.cd", "true"])?;
+
+    let (stdout, _stderr) = git.run(&["wt", "add", "topic-wt"])?;
+    assert!(
+        stdout.contains("Created worktree at:"),
+        "stdout was: {stdout}"
+    );
+    assert!(stdout.contains("\ncd '"), "stdout was: {stdout}");
+    assert!(stdout.contains("topic-wt"), "stdout was: {stdout}");
+
+    Ok(())
+}
+
+#[test]
+fn test_wt_add_no_cd_flag_overrides_config() -> eyre::Result<()> {
+    let git = make_git()?;
+    git.init_repo()?;
+    let _worktree_root = set_worktree_root(&git)?;
+    git.run(&["config", "branchless.worktree.add.cd", "true"])?;
+
+    let (stdout, _stderr) = git.run(&["wt", "add", "--no-cd", "topic-wt"])?;
+    assert!(
+        stdout.contains("Created worktree at:"),
+        "stdout was: {stdout}"
+    );
+    assert!(!stdout.contains("\ncd '"), "stdout was: {stdout}");
+
+    Ok(())
+}
+
+#[test]
+fn test_wt_add_cd_flag_overrides_config() -> eyre::Result<()> {
+    let git = make_git()?;
+    git.init_repo()?;
+    let _worktree_root = set_worktree_root(&git)?;
+    git.run(&["config", "branchless.worktree.add.cd", "false"])?;
+
+    let (stdout, _stderr) = git.run(&["wt", "add", "--cd", "topic-wt"])?;
+    assert!(
+        stdout.contains("Created worktree at:"),
+        "stdout was: {stdout}"
+    );
+    assert!(stdout.contains("\ncd '"), "stdout was: {stdout}");
 
     Ok(())
 }

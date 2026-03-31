@@ -14,20 +14,21 @@ use cursive_core::utils::markup::StyledString;
 use eyre::WrapErr;
 #[cfg(not(unix))]
 use itertools::Itertools;
+use lib::core::config::get_worktree_add_cd;
 use lib::core::effects::Effects;
 use lib::core::formatting::Glyphs;
 use lib::core::node_descriptors::RelativeTimeDescriptor;
-use lib::core::worktree::{WorktreeEntry, WorktreeSnapshot, get_linked_worktrees};
+use lib::core::worktree::{get_linked_worktrees, WorktreeEntry, WorktreeSnapshot};
 use lib::git::{
     BranchType, ConfigRead, GitErrorCode, GitRunInfo, NonZeroOid, ReferenceName, Repo, RepoError,
 };
-use lib::util::{ExitCode, EyreExitOr, get_sh};
+use lib::util::{get_sh, ExitCode, EyreExitOr};
 use tracing::instrument;
 
 use git_branchless_opts::{ResolveRevsetOptions, Revset, WorktreeArgs, WorktreeSubcommand};
 use git_branchless_revset::resolve_commits;
-use git_branchless_smartlog::{SmartlogOptions, smartlog};
-use lib::core::dag::{Dag, union_all};
+use git_branchless_smartlog::{smartlog, SmartlogOptions};
+use lib::core::dag::{union_all, Dag};
 use lib::core::eventlog::{EventLogDb, EventReplayer};
 use lib::core::repo_ext::RepoExt;
 use lib::try_exit_code;
@@ -146,9 +147,7 @@ fn find_local_branch(repo: &Repo, target: &str) -> eyre::Result<Option<Reference
     match repo.find_branch(target, BranchType::Local) {
         Ok(Some(branch)) => Ok(Some(branch.get_reference_name()?)),
         Ok(None) => Ok(None),
-        Err(RepoError::FindBranch { source, .. })
-            if source.code() == GitErrorCode::InvalidSpec =>
-        {
+        Err(RepoError::FindBranch { source, .. }) if source.code() == GitErrorCode::InvalidSpec => {
             Ok(None)
         }
         Err(err) => Err(err.into()),
@@ -214,7 +213,9 @@ fn run_post_create_hook(
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
-    let output = command.output().wrap_err("Running worktree post-create hook")?;
+    let output = command
+        .output()
+        .wrap_err("Running worktree post-create hook")?;
     write!(
         effects.get_output_stream(),
         "{}",
@@ -297,13 +298,23 @@ fn add_worktree(
     requested_name: &str,
     target: Option<&Revset>,
     new_branch: Option<&str>,
+    should_cd_override: Option<bool>,
 ) -> EyreExitOr<()> {
     let target_text = target.map(ToString::to_string);
+    let target_branch_name = match target_text.as_deref() {
+        Some(target_text) => find_local_branch(repo, target_text)?,
+        None => None,
+    };
+    let git_target = match target {
+        Some(_target) if target_branch_name.is_some() => target_text.clone(),
+        Some(target) => Some(resolve_target_oid(effects, repo, target)?.to_string()),
+        None => None,
+    };
+
     let worktree_snapshot = get_linked_worktrees(git_run_info, repo)?;
-    let maybe_branch_name = match (new_branch, target_text.as_deref()) {
+    let maybe_branch_name = match (new_branch, target_branch_name) {
         (Some(branch_name), _) => Some(ReferenceName::from(format!("refs/heads/{branch_name}"))),
-        (None, Some(target_text)) => find_local_branch(repo, target_text)?,
-        (None, None) => None,
+        (None, branch_name) => branch_name,
     };
 
     if let Some(branch_name) = maybe_branch_name.as_ref() {
@@ -337,8 +348,8 @@ fn add_worktree(
         args.push("--detach".into());
     }
     args.push(worktree_path.as_os_str().to_os_string());
-    if let Some(target_text) = target_text {
-        args.push(target_text.into());
+    if let Some(git_target) = git_target {
+        args.push(git_target.into());
     }
     match run_git_worktree_command(effects, git_run_info, repo, &args)? {
         Ok(()) => {}
@@ -354,12 +365,17 @@ fn add_worktree(
         .ok_or_else(|| eyre::eyre!("Created worktree was not discoverable afterwards"))?;
     try_exit_code!(run_post_create_hook(effects, git_run_info, repo, &entry)?);
     print_worktree_path(effects, "Created worktree at:", &entry)?;
+    let should_cd = should_cd_override.unwrap_or(get_worktree_add_cd(repo)?);
+    if should_cd {
+        print_cd_path(effects, &entry.path)?;
+    }
     Ok(Ok(()))
 }
 
 #[cfg(not(unix))]
 fn prompt_select_worktree(
     effects: &Effects,
+    _git_run_info: &GitRunInfo,
     _repo: &Repo,
     snapshot: &WorktreeSnapshot,
     _initial_query: &str,
@@ -466,7 +482,10 @@ fn describe_worktree_summary(repo: &Repo, entry: &WorktreeEntry) -> eyre::Result
         summary.append_styled(branch_name, BaseColor::Green.light());
     }
 
-    match entry.head_oid.and_then(|oid| repo.find_commit(oid).ok().flatten()) {
+    match entry
+        .head_oid
+        .and_then(|oid| repo.find_commit(oid).ok().flatten())
+    {
         Some(commit) => {
             summary.append_plain(" ");
             summary.append_styled(commit.get_short_oid()?, BaseColor::Yellow.dark());
@@ -518,7 +537,11 @@ fn describe_worktree_entry(
         writeln!(preview, "head: {}", oid)?;
     }
     writeln!(preview)?;
-    write!(preview, "{}", get_worktree_smartlog_preview(git_run_info, entry)?)?;
+    write!(
+        preview,
+        "{}",
+        get_worktree_smartlog_preview(git_run_info, entry)?
+    )?;
     Ok((summary, preview))
 }
 
@@ -665,9 +688,8 @@ fn finish_worktree(
     let parent_working_directory = repo
         .get_working_copy_path()
         .ok_or_else(|| eyre::eyre!("Repository does not have a working copy path"))?;
-    let should_switch_to_main_worktree =
-        canonicalize_best_effort(&git_run_info.working_directory)
-            .starts_with(canonicalize_best_effort(&entry.path));
+    let should_switch_to_main_worktree = canonicalize_best_effort(&git_run_info.working_directory)
+        .starts_with(canonicalize_best_effort(&entry.path));
     if should_switch_to_main_worktree {
         print_cd_path(effects, &parent_working_directory)?;
     }
@@ -723,8 +745,8 @@ mod worktree_skim {
 
     use eyre::eyre;
     use skim::{
-        AnsiString, DisplayContext, ItemPreview, Matches, PreviewContext, Skim, SkimItem,
-        SkimItemReceiver, SkimItemSender, prelude::SkimOptionsBuilder,
+        prelude::SkimOptionsBuilder, AnsiString, DisplayContext, ItemPreview, Matches,
+        PreviewContext, Skim, SkimItem, SkimItemReceiver, SkimItemSender,
     };
 
     use super::*;
@@ -846,6 +868,8 @@ pub fn command_main(
     match args.subcommand {
         WorktreeSubcommand::Add {
             new_branch,
+            cd,
+            no_cd,
             name,
             target,
         } => add_worktree(
@@ -855,6 +879,13 @@ pub fn command_main(
             &name,
             target.as_ref(),
             new_branch.as_deref(),
+            if cd {
+                Some(true)
+            } else if no_cd {
+                Some(false)
+            } else {
+                None
+            },
         ),
         WorktreeSubcommand::Finish { target } => {
             finish_worktree(effects, git_run_info, &repo, target.as_deref())
