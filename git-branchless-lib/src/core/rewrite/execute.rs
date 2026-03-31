@@ -13,6 +13,7 @@ use crate::core::effects::Effects;
 use crate::core::eventlog::{EventLogDb, EventTransactionId};
 use crate::core::formatting::Pluralize;
 use crate::core::repo_ext::RepoExt;
+use crate::core::worktree::get_linked_worktrees;
 use crate::git::{
     BranchType, CategorizedReferenceName, GitRunInfo, MaybeZeroOid, NonZeroOid, ReferenceName,
     Repo, ResolvedReferenceInfo,
@@ -34,6 +35,25 @@ pub fn move_branches<'a>(
     let main_branch = repo.get_main_branch()?;
     let main_branch_name = main_branch.get_reference_name()?;
     let branch_oid_to_names = repo.get_branch_oid_to_names()?;
+    let worktree_snapshot = get_linked_worktrees(git_run_info, repo)?;
+
+    for (old_oid, names) in branch_oid_to_names.iter() {
+        if !rewritten_oids_map.contains_key(old_oid) {
+            continue;
+        }
+        for reference_name in names {
+            if let Some(entry) = worktree_snapshot.find_by_branch(reference_name) {
+                if !entry.is_current {
+                    let branch_name = CategorizedReferenceName::new(reference_name).render_suffix();
+                    eyre::bail!(
+                        "Branch '{}' is active in another worktree at '{}'. Refusing to move it.",
+                        branch_name,
+                        entry.path.to_string_lossy()
+                    );
+                }
+            }
+        }
+    }
 
     // We may experience an error in the case of a branch move. Ideally, we
     // would use `git2::Transaction::commit`, which stops the transaction at the
@@ -439,7 +459,7 @@ mod in_memory {
         AmendFastOptions, CherryPickFastOptions, CreateCommitFastError, GitRunInfo, MaybeZeroOid,
         NonZeroOid, Repo,
     };
-    use crate::util::EyreExitOr;
+    use crate::util::{ExitCode, EyreExitOr};
 
     use super::{ExecuteRebasePlanOptions, FailedMergeInfo};
 
@@ -928,7 +948,11 @@ mod in_memory {
             repo.detach_head(&head_info)?;
         }
 
-        move_branches(effects, git_run_info, repo, *event_tx_id, rewritten_oids)?;
+        if let Err(err) = move_branches(effects, git_run_info, repo, *event_tx_id, rewritten_oids)
+        {
+            writeln!(effects.get_error_stream(), "{err}")?;
+            return Ok(Err(ExitCode(1)));
+        }
 
         // Call the `post-rewrite` hook only after moving branches so that we don't
         // produce a spurious abandoned-branch warning.
@@ -1311,9 +1335,8 @@ pub fn execute_rebase_plan(
                     options,
                 )? {
                     Ok(()) => {}
-                    Err(_exit_code) => {
-                        // FIXME: we may still want to propagate the exit code to the
-                        // caller.
+                    Err(exit_code) => {
+                        return Ok(ExecuteRebasePlanResult::Failed { exit_code });
                     }
                 }
 
