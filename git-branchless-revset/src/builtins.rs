@@ -5,6 +5,7 @@ use lib::core::dag::CommitSet;
 use lib::core::eventlog::{EventLogDb, EventReplayer};
 use lib::core::repo_ext::RepoExt;
 use lib::core::rewrite::find_rewrite_target;
+use lib::core::worktree::get_linked_worktrees_for_repo;
 use lib::git::{
     CategorizedReferenceName, Commit, MaybeZeroOid, Repo, SerializedNonZeroOid,
     SerializedTestResult, TEST_ABORT_EXIT_CODE, TEST_INDETERMINATE_EXIT_CODE,
@@ -52,6 +53,7 @@ lazy_static! {
             ("public", &fn_public),
             ("draft", &fn_draft),
             ("stack", &fn_stack),
+            ("worktrees", &fn_worktrees),
             ("message", &fn_message),
             ("paths.changed", &fn_path_changed),
             ("author.name", &fn_author_name),
@@ -242,6 +244,26 @@ fn fn_branches(ctx: &mut Context, name: &str, args: &[Expr], _: &Option<&CommitS
     )?;
 
     Ok(branch_commits)
+}
+
+#[instrument]
+fn fn_worktrees(
+    ctx: &mut Context,
+    name: &str,
+    args: &[Expr],
+    _: &Option<&CommitSet>,
+) -> EvalResult {
+    eval0(ctx, name, args)?;
+    let snapshot = get_linked_worktrees_for_repo(ctx.repo).map_err(EvalError::OtherError)?;
+    let commits: CommitSet = snapshot
+        .entries
+        .into_iter()
+        .filter_map(|entry| entry.head_oid)
+        .collect();
+    ctx.dag
+        .sync_from_oids(ctx.effects, ctx.repo, CommitSet::empty(), commits.clone())
+        .map_err(EvalError::OtherError)?;
+    Ok(commits)
 }
 
 #[instrument]

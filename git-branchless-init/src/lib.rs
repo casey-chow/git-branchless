@@ -103,6 +103,7 @@ const ALL_ALIASES: &[(&str, &str)] = &[
     ("test", "test"),
     ("undo", "undo"),
     ("unhide", "unhide"),
+    ("wt", "worktree"),
 ];
 
 /// A specification for installing a Git hook on disk.

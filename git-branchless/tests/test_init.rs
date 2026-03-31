@@ -630,7 +630,7 @@ fn test_init_worktree() -> eyre::Result<()> {
         let stdout = worktree.smartlog()?;
         insta::assert_snapshot!(stdout, @r###"
         :
-        @ 96d1c37 (master) create test2.txt
+        @ 96d1c37 (> master) create test2.txt
         "###);
     }
 
@@ -751,6 +751,9 @@ fn test_install_man_pages() -> eyre::Result<()> {
     .TP
     git\-branchless\-test(1)
     Run a command on each commit in a given set and aggregate the results
+    .TP
+    git\-branchless\-worktree(1)
+    Manage linked worktrees with branchless defaults
     .TP
     git\-branchless\-undo(1)
     Browse or return to a previous state of the repository

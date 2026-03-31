@@ -18,6 +18,7 @@ use crate::core::config::{
     get_commit_descriptors_branches, get_commit_descriptors_differential_revision,
     get_commit_descriptors_relative_time,
 };
+use crate::core::worktree::WorktreeSnapshot;
 use crate::git::{
     CategorizedReferenceName, Commit, NonZeroOid, ReferenceName, Repo, ResolvedReferenceInfo,
 };
@@ -296,6 +297,7 @@ pub struct BranchesDescriptor<'a> {
     is_enabled: bool,
     head_info: &'a ResolvedReferenceInfo,
     references_snapshot: &'a RepoReferencesSnapshot,
+    worktree_snapshot: Option<&'a WorktreeSnapshot>,
     redactor: &'a Redactor,
 }
 
@@ -305,6 +307,7 @@ impl<'a> BranchesDescriptor<'a> {
         repo: &Repo,
         head_info: &'a ResolvedReferenceInfo,
         references_snapshot: &'a RepoReferencesSnapshot,
+        worktree_snapshot: Option<&'a WorktreeSnapshot>,
         redactor: &'a Redactor,
     ) -> eyre::Result<Self> {
         let is_enabled = get_commit_descriptors_branches(repo)?;
@@ -312,6 +315,7 @@ impl<'a> BranchesDescriptor<'a> {
             is_enabled,
             head_info,
             references_snapshot,
+            worktree_snapshot,
             redactor,
         })
     }
@@ -346,10 +350,20 @@ impl NodeDescriptor for BranchesDescriptor<'_> {
             let mut branch_names: Vec<String> = branch_names
                 .into_iter()
                 .map(|branch_name| {
-                    let is_checked_out_branch =
-                        self.head_info.reference_name.as_ref() == Some(&branch_name);
-                    let icon = if is_checked_out_branch {
+                    let is_current_worktree_branch = self
+                        .worktree_snapshot
+                        .and_then(|snapshot| snapshot.current())
+                        .and_then(|entry| entry.branch_name.as_ref())
+                        == Some(&branch_name)
+                        || self.head_info.reference_name.as_ref() == Some(&branch_name);
+                    let icon = if is_current_worktree_branch {
                         format!("{} ", glyphs.branch_arrow)
+                    } else if self
+                        .worktree_snapshot
+                        .map(|snapshot| snapshot.find_by_branch(&branch_name).is_some())
+                        .unwrap_or(false)
+                    {
+                        "+ ".to_string()
                     } else {
                         "".to_string()
                     };
@@ -373,6 +387,55 @@ impl NodeDescriptor for BranchesDescriptor<'_> {
                 BaseColor::Green.light(),
             );
             Ok(Some(result))
+        }
+    }
+}
+
+/// Display detached worktrees which currently have a commit checked out.
+#[derive(Debug)]
+pub struct WorktreeDescriptor<'a> {
+    worktree_snapshot: &'a WorktreeSnapshot,
+}
+
+impl<'a> WorktreeDescriptor<'a> {
+    /// Constructor.
+    pub fn new(worktree_snapshot: &'a WorktreeSnapshot) -> eyre::Result<Self> {
+        Ok(Self { worktree_snapshot })
+    }
+}
+
+impl NodeDescriptor for WorktreeDescriptor<'_> {
+    fn describe_node(
+        &mut self,
+        _glyphs: &Glyphs,
+        object: &NodeObject,
+    ) -> eyre::Result<Option<StyledString>> {
+        if self.worktree_snapshot.entries.len() <= 1 {
+            return Ok(None);
+        }
+
+        let worktrees: Vec<String> = self
+            .worktree_snapshot
+            .find_by_head_oid(object.get_oid())
+            .into_iter()
+            .map(|entry| {
+                let icon = match (entry.is_current, entry.is_main) {
+                    (true, true) => "⌂ ᐅ".to_string(),
+                    (true, false) => "ᐅ".to_string(),
+                    (false, true) => "⌂".to_string(),
+                    (false, false) => "⎇".to_string(),
+                };
+                format!("{icon} {}", entry.display_name())
+            })
+            .collect();
+
+        if worktrees.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(StyledString::styled(
+                format!("({})", worktrees.join(", ")),
+                BaseColor::Blue.light(),
+            )))
         }
     }
 }
