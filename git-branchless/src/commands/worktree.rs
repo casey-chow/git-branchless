@@ -448,8 +448,7 @@ fn prompt_select_worktree(
 
 fn describe_worktree_summary(repo: &Repo, entry: &WorktreeEntry) -> eyre::Result<StyledString> {
     let mut summary = StyledString::new();
-    let _ = entry;
-    let worktree_icon = "ᐅ";
+    let worktree_icon = if entry.is_current { "ᐅ" } else { "⎇" };
     summary.append_styled(worktree_icon, BaseColor::Blue.light());
     summary.append_plain(" ");
     summary.append_styled(entry.display_name(), BaseColor::Blue.light());
@@ -460,7 +459,7 @@ fn describe_worktree_summary(repo: &Repo, entry: &WorktreeEntry) -> eyre::Result
             .strip_prefix("refs/heads/")
             .unwrap_or(branch_name.as_str());
         summary.append_plain(" ");
-        summary.append_styled(format!("+{branch_name}"), BaseColor::Green.light());
+        summary.append_styled(branch_name, BaseColor::Green.light());
     }
 
     match entry.head_oid.and_then(|oid| repo.find_commit(oid).ok().flatten()) {

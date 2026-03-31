@@ -38,7 +38,7 @@ fn test_worktree_add_marks_detached_worktree_in_smartlog() -> eyre::Result<()> {
 
     let stdout = git.smartlog()?;
     assert!(
-        stdout.contains("(ᐅ side)"),
+        stdout.contains("(⎇ side)"),
         "smartlog output was: {stdout}"
     );
     assert!(stdout.contains(&test1_oid.to_string()[..7]));
@@ -226,7 +226,7 @@ fn test_wt_list_uses_smartlog_for_worktrees() -> eyre::Result<()> {
     let (stdout, _stderr) = git.run(&["wt", "list"])?;
     assert!(stdout.contains(&test1_oid.to_string()[..7]), "stdout was: {stdout}");
     assert!(stdout.contains("test-worktrees"), "stdout was: {stdout}");
-    assert!(stdout.contains("ᐅ side"), "stdout was: {stdout}");
+    assert!(stdout.contains("⎇ side"), "stdout was: {stdout}");
     assert!(stdout.contains("create test1.txt"), "stdout was: {stdout}");
 
     Ok(())
@@ -289,8 +289,8 @@ fn test_smartlog_shows_current_and_home_worktree_annotations() -> eyre::Result<(
 
     let stdout = worktree.smartlog()?;
     assert!(
-        stdout.contains(&format!("(ᐅ {repo_name}, ᐅ topic-wt)"))
-            || stdout.contains(&format!("(ᐅ topic-wt, ᐅ {repo_name})")),
+        stdout.contains(&format!("(⎇ {repo_name}, ᐅ topic-wt)"))
+            || stdout.contains(&format!("(ᐅ topic-wt, ⎇ {repo_name})")),
         "smartlog should show both current and home worktrees: {stdout}"
     );
 
