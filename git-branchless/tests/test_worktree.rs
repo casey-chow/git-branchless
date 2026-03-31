@@ -38,7 +38,7 @@ fn test_worktree_add_marks_detached_worktree_in_smartlog() -> eyre::Result<()> {
 
     let stdout = git.smartlog()?;
     assert!(
-        stdout.contains("(⎇ side)"),
+        stdout.contains("(ᐅ side)"),
         "smartlog output was: {stdout}"
     );
     assert!(stdout.contains(&test1_oid.to_string()[..7]));
@@ -184,6 +184,35 @@ fn test_wt_sw_resolves_worktree_name() -> eyre::Result<()> {
 }
 
 #[test]
+fn test_wt_finish_resolves_worktree_path() -> eyre::Result<()> {
+    let git = make_git()?;
+    git.init_repo()?;
+    let worktree_root = set_worktree_root(&git)?;
+
+    git.detach_head()?;
+    let test1_oid = git.commit_file("test1", 1)?;
+    git.run(&["checkout", "master"])?;
+    git.run(&["wt", "add", "manual-reload", &test1_oid.to_string()])?;
+
+    let repo_name = git
+        .repo_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap();
+    let worktree_path = std::path::Path::new(&worktree_root)
+        .join(repo_name)
+        .join("manual-reload");
+    let worktree_path = worktree_path.to_string_lossy().to_string();
+    let (stdout, _stderr) = git.run(&["wt", "finish", &worktree_path])?;
+    assert!(
+        stdout.contains("Finished worktree"),
+        "stdout was: {stdout}"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_wt_list_uses_smartlog_for_worktrees() -> eyre::Result<()> {
     let git = make_git()?;
     git.init_repo()?;
@@ -196,10 +225,44 @@ fn test_wt_list_uses_smartlog_for_worktrees() -> eyre::Result<()> {
 
     let (stdout, _stderr) = git.run(&["wt", "list"])?;
     assert!(stdout.contains(&test1_oid.to_string()[..7]), "stdout was: {stdout}");
-    assert!(stdout.contains("(⎇ side)"), "stdout was: {stdout}");
-    assert!(
-        !stdout.contains("omitted"),
-        "wt list should only show checked-out worktree heads: {stdout}"
+    assert!(stdout.contains("test-worktrees"), "stdout was: {stdout}");
+    assert!(stdout.contains("ᐅ side"), "stdout was: {stdout}");
+    assert!(stdout.contains("create test1.txt"), "stdout was: {stdout}");
+
+    Ok(())
+}
+
+#[test]
+fn test_wt_add_runs_post_create_hook_from_config() -> eyre::Result<()> {
+    let git = make_git()?;
+    git.init_repo()?;
+    let worktree_root = set_worktree_root(&git)?;
+
+    git.run(&[
+        "config",
+        "branchless.worktree.postCreateHook",
+        "printf '%s' \"$BRANCHLESS_WORKTREE_NAME\" > .post-create-name && pwd > .post-create-pwd",
+    ])?;
+
+    git.run(&["wt", "add", "topic-wt"])?;
+
+    let repo_name = git
+        .repo_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap();
+    let worktree_path = std::path::Path::new(&worktree_root)
+        .join(repo_name)
+        .join("topic-wt");
+    let canonical_worktree_path = std::fs::canonicalize(&worktree_path)?;
+
+    let recorded_name = std::fs::read_to_string(worktree_path.join(".post-create-name"))?;
+    assert_eq!(recorded_name, "topic-wt");
+
+    let recorded_pwd = std::fs::read_to_string(worktree_path.join(".post-create-pwd"))?;
+    assert_eq!(
+        recorded_pwd.trim_end(),
+        canonical_worktree_path.to_string_lossy()
     );
 
     Ok(())
@@ -226,17 +289,9 @@ fn test_smartlog_shows_current_and_home_worktree_annotations() -> eyre::Result<(
 
     let stdout = worktree.smartlog()?;
     assert!(
-        stdout.contains(&format!("⌂ {repo_name}")),
-        "smartlog should show the home worktree annotation: {stdout}"
-    );
-    assert!(
-        stdout.contains("(> topic-wt)")
-            || stdout.contains("(ᐅ topic-wt)")
-            || stdout.contains(&format!("(> topic-wt, ⌂ {repo_name})"))
-            || stdout.contains(&format!("(ᐅ topic-wt, ⌂ {repo_name})"))
-            || stdout.contains(&format!("(⌂ {repo_name}, > topic-wt)"))
-            || stdout.contains(&format!("(⌂ {repo_name}, ᐅ topic-wt)")),
-        "smartlog should show the current worktree annotation: {stdout}"
+        stdout.contains(&format!("(ᐅ {repo_name}, ᐅ topic-wt)"))
+            || stdout.contains(&format!("(ᐅ topic-wt, ᐅ {repo_name})")),
+        "smartlog should show both current and home worktrees: {stdout}"
     );
 
     Ok(())

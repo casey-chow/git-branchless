@@ -5,18 +5,23 @@ use std::fmt::Write;
 #[cfg(not(unix))]
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use cursive_core::theme::BaseColor;
 use cursive_core::utils::markup::StyledString;
+use eyre::WrapErr;
 #[cfg(not(unix))]
 use itertools::Itertools;
 use lib::core::effects::Effects;
 use lib::core::formatting::Glyphs;
 use lib::core::node_descriptors::RelativeTimeDescriptor;
 use lib::core::worktree::{WorktreeEntry, WorktreeSnapshot, get_linked_worktrees};
-use lib::git::{BranchType, ConfigRead, GitRunInfo, NonZeroOid, ReferenceName, Repo};
-use lib::util::{ExitCode, EyreExitOr};
+use lib::git::{
+    BranchType, ConfigRead, GitErrorCode, GitRunInfo, NonZeroOid, ReferenceName, Repo, RepoError,
+};
+use lib::util::{ExitCode, EyreExitOr, get_sh};
 use tracing::instrument;
 
 use git_branchless_opts::{ResolveRevsetOptions, Revset, WorktreeArgs, WorktreeSubcommand};
@@ -25,6 +30,7 @@ use git_branchless_smartlog::{SmartlogOptions, smartlog};
 use lib::core::dag::{Dag, union_all};
 use lib::core::eventlog::{EventLogDb, EventReplayer};
 use lib::core::repo_ext::RepoExt;
+use lib::try_exit_code;
 
 fn expand_home(path: PathBuf) -> eyre::Result<PathBuf> {
     let path_string = path.to_string_lossy();
@@ -137,9 +143,15 @@ fn resolve_target_oid(effects: &Effects, repo: &Repo, target: &Revset) -> eyre::
 }
 
 fn find_local_branch(repo: &Repo, target: &str) -> eyre::Result<Option<ReferenceName>> {
-    match repo.find_branch(target, BranchType::Local)? {
-        Some(branch) => Ok(Some(branch.get_reference_name()?)),
-        None => Ok(None),
+    match repo.find_branch(target, BranchType::Local) {
+        Ok(Some(branch)) => Ok(Some(branch.get_reference_name()?)),
+        Ok(None) => Ok(None),
+        Err(RepoError::FindBranch { source, .. })
+            if source.code() == GitErrorCode::InvalidSpec =>
+        {
+            Ok(None)
+        }
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -158,6 +170,110 @@ fn print_switch_command(effects: &Effects, entry: &WorktreeEntry) -> eyre::Resul
     let quoted_path = format!("'{}'", path.replace('\'', "'\"'\"'"));
     writeln!(effects.get_output_stream(), "cd {quoted_path}")?;
     Ok(())
+}
+
+fn get_post_create_hook(repo: &Repo) -> eyre::Result<Option<String>> {
+    repo.get_readonly_config()?
+        .get("branchless.worktree.postCreateHook")
+}
+
+fn run_post_create_hook(
+    effects: &Effects,
+    git_run_info: &GitRunInfo,
+    repo: &Repo,
+    entry: &WorktreeEntry,
+) -> EyreExitOr<()> {
+    let Some(hook_command) = get_post_create_hook(repo)? else {
+        return Ok(Ok(()));
+    };
+
+    let shell = get_sh().ok_or_else(|| eyre::eyre!("could not get sh"))?;
+    let mut command = Command::new(shell);
+    command.current_dir(&entry.path);
+    command.arg("-c").arg(&hook_command);
+    command.env_clear();
+    command.envs(git_run_info.env.iter());
+    command.env("BRANCHLESS_WORKTREE_PATH", &entry.path);
+    command.env("BRANCHLESS_WORKTREE_NAME", entry.display_name());
+    if let Some(branch_name) = &entry.branch_name {
+        command.env(
+            "BRANCHLESS_WORKTREE_BRANCH",
+            branch_name
+                .as_str()
+                .strip_prefix("refs/heads/")
+                .unwrap_or(branch_name.as_str()),
+        );
+    }
+    if let Some(head_oid) = entry.head_oid {
+        command.env("BRANCHLESS_WORKTREE_HEAD", head_oid.to_string());
+    }
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+
+    let output = command.output().wrap_err("Running worktree post-create hook")?;
+    write!(
+        effects.get_output_stream(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    )
+    .wrap_err("Writing post-create hook stdout")?;
+    write!(
+        effects.get_error_stream(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    )
+    .wrap_err("Writing post-create hook stderr")?;
+
+    let exit_code = ExitCode(output.status.code().unwrap_or(1).try_into()?);
+    if exit_code.is_success() {
+        Ok(Ok(()))
+    } else {
+        writeln!(
+            effects.get_error_stream(),
+            "Worktree post-create hook failed for '{}'.",
+            entry.display_name()
+        )?;
+        Ok(Err(exit_code))
+    }
+}
+
+fn get_worktree_smartlog_preview(
+    git_run_info: &GitRunInfo,
+    entry: &WorktreeEntry,
+) -> eyre::Result<String> {
+    let stdout = Arc::new(Mutex::new(Vec::new()));
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let effects = Effects::new_from_buffer_for_test(Glyphs::pretty(), &stdout, &stderr);
+    let git_run_info = GitRunInfo {
+        working_directory: entry.path.clone(),
+        ..git_run_info.clone()
+    };
+    match smartlog(
+        &effects,
+        &git_run_info,
+        SmartlogOptions {
+            event_id: None,
+            revset: None,
+            resolve_revset_options: ResolveRevsetOptions::default(),
+            reverse: false,
+            exact: false,
+            include_related_commits: true,
+        },
+    )? {
+        Ok(()) => {
+            let stdout = stdout.lock().unwrap();
+            Ok(String::from_utf8_lossy(&stdout).trim_end().to_string())
+        }
+        Err(_exit_code) => {
+            let stderr = stderr.lock().unwrap();
+            let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
+            if stderr.is_empty() {
+                Ok("<unable to render smartlog preview>".to_string())
+            } else {
+                Ok(format!("<unable to render smartlog preview>\n{stderr}"))
+            }
+        }
+    }
 }
 
 fn run_git_worktree_command(
@@ -232,6 +348,7 @@ fn add_worktree(
         .into_iter()
         .find(|entry| entry.path == worktree_path)
         .ok_or_else(|| eyre::eyre!("Created worktree was not discoverable afterwards"))?;
+    try_exit_code!(run_post_create_hook(effects, git_run_info, repo, &entry)?);
     print_worktree_path(effects, "Created worktree at:", &entry)?;
     Ok(Ok(()))
 }
@@ -329,15 +446,10 @@ fn prompt_select_worktree(
     }
 }
 
-fn describe_worktree_entry(repo: &Repo, entry: &WorktreeEntry) -> eyre::Result<(StyledString, String)> {
+fn describe_worktree_summary(repo: &Repo, entry: &WorktreeEntry) -> eyre::Result<StyledString> {
     let mut summary = StyledString::new();
-    let worktree_icon = if entry.is_current {
-        "ᐅ"
-    } else if entry.is_main {
-        "⌂"
-    } else {
-        "⎇"
-    };
+    let _ = entry;
+    let worktree_icon = "ᐅ";
     summary.append_styled(worktree_icon, BaseColor::Blue.light());
     summary.append_plain(" ");
     summary.append_styled(entry.display_name(), BaseColor::Blue.light());
@@ -348,7 +460,7 @@ fn describe_worktree_entry(repo: &Repo, entry: &WorktreeEntry) -> eyre::Result<(
             .strip_prefix("refs/heads/")
             .unwrap_or(branch_name.as_str());
         summary.append_plain(" ");
-        summary.append_styled(format!("+ {branch_name}"), BaseColor::Green.light());
+        summary.append_styled(format!("+{branch_name}"), BaseColor::Green.light());
     }
 
     match entry.head_oid.and_then(|oid| repo.find_commit(oid).ok().flatten()) {
@@ -365,34 +477,7 @@ fn describe_worktree_entry(repo: &Repo, entry: &WorktreeEntry) -> eyre::Result<(
             );
             summary.append_plain(" ");
             summary.append_plain(commit.get_summary()?.to_string());
-
-            let mut preview = String::new();
-            writeln!(preview, "worktree: {}", entry.display_name())?;
-            writeln!(preview, "path: {}", entry.path.to_string_lossy())?;
-            writeln!(
-                preview,
-                "kind: {}",
-                if entry.is_main {
-                    "home worktree"
-                } else {
-                    "linked worktree"
-                }
-            )?;
-            if let Some(branch_name) = &entry.branch_name {
-                writeln!(
-                    preview,
-                    "branch: {}",
-                    branch_name
-                        .as_str()
-                        .strip_prefix("refs/heads/")
-                        .unwrap_or(branch_name.as_str())
-                )?;
-            } else {
-                writeln!(preview, "branch: detached")?;
-            }
-            writeln!(preview, "head: {}", commit.get_oid())?;
-            write!(preview, "\n{}", Glyphs::pretty().render(commit.friendly_preview()?)?)?;
-            Ok((summary, preview))
+            Ok(summary)
         }
         None => {
             if let Some(oid) = entry.head_oid {
@@ -401,47 +486,48 @@ fn describe_worktree_entry(repo: &Repo, entry: &WorktreeEntry) -> eyre::Result<(
             }
             summary.append_plain(" ");
             summary.append_styled("<unborn or unavailable>", BaseColor::Yellow.light());
-
-            let mut preview = String::new();
-            writeln!(preview, "worktree: {}", entry.display_name())?;
-            writeln!(preview, "path: {}", entry.path.to_string_lossy())?;
-            writeln!(
-                preview,
-                "kind: {}",
-                if entry.is_main {
-                    "home worktree"
-                } else {
-                    "linked worktree"
-                }
-            )?;
-            if let Some(branch_name) = &entry.branch_name {
-                writeln!(
-                    preview,
-                    "branch: {}",
-                    branch_name
-                        .as_str()
-                        .strip_prefix("refs/heads/")
-                        .unwrap_or(branch_name.as_str())
-                )?;
-            } else {
-                writeln!(preview, "branch: detached")?;
-            }
-            if let Some(oid) = entry.head_oid {
-                writeln!(preview, "head: {}", oid)?;
-            }
-            Ok((summary, preview))
+            Ok(summary)
         }
     }
+}
+
+fn describe_worktree_entry(
+    repo: &Repo,
+    git_run_info: &GitRunInfo,
+    entry: &WorktreeEntry,
+) -> eyre::Result<(StyledString, String)> {
+    let summary = describe_worktree_summary(repo, entry)?;
+    let mut preview = String::new();
+    writeln!(preview, "{}", entry.path.to_string_lossy())?;
+    if let Some(branch_name) = &entry.branch_name {
+        writeln!(
+            preview,
+            "branch: {}",
+            branch_name
+                .as_str()
+                .strip_prefix("refs/heads/")
+                .unwrap_or(branch_name.as_str())
+        )?;
+    } else {
+        writeln!(preview, "branch: detached")?;
+    }
+    if let Some(oid) = entry.head_oid {
+        writeln!(preview, "head: {}", oid)?;
+    }
+    writeln!(preview)?;
+    write!(preview, "{}", get_worktree_smartlog_preview(git_run_info, entry)?)?;
+    Ok((summary, preview))
 }
 
 #[cfg(unix)]
 fn prompt_select_worktree(
     _effects: &Effects,
+    git_run_info: &GitRunInfo,
     repo: &Repo,
     snapshot: &WorktreeSnapshot,
     initial_query: &str,
 ) -> eyre::Result<Option<WorktreeEntry>> {
-    worktree_skim::prompt(repo, snapshot, initial_query)
+    worktree_skim::prompt(git_run_info, repo, snapshot, initial_query)
 }
 
 fn switch_worktree(
@@ -454,7 +540,7 @@ fn switch_worktree(
     let snapshot = get_linked_worktrees(git_run_info, repo)?;
     let selected = if interactive {
         let initial_query = target.map(ToString::to_string).unwrap_or_default();
-        match prompt_select_worktree(effects, repo, &snapshot, &initial_query)? {
+        match prompt_select_worktree(effects, git_run_info, repo, &snapshot, &initial_query)? {
             Some(entry) => entry,
             None => return Ok(Err(ExitCode(1))),
         }
@@ -532,18 +618,18 @@ fn resolve_finish_target(
     target: Option<&str>,
 ) -> eyre::Result<WorktreeEntry> {
     if let Some(target) = target {
-        if let Some(branch_name) = find_local_branch(repo, target)? {
-            if let Some(entry) = snapshot.find_by_branch(&branch_name) {
-                return Ok(entry.clone());
-            }
-        }
-        let target_path = Path::new(target);
+        let target_path = canonicalize_best_effort(Path::new(target));
         if let Some(entry) = snapshot.entries.iter().find(|entry| {
             entry.path == target_path
                 || entry.display_name() == target
                 || entry.path.to_string_lossy() == target
         }) {
             return Ok(entry.clone());
+        }
+        if let Some(branch_name) = find_local_branch(repo, target)? {
+            if let Some(entry) = snapshot.find_by_branch(&branch_name) {
+                return Ok(entry.clone());
+            }
         }
         eyre::bail!("Could not resolve worktree target '{target}'")
     } else {
@@ -602,18 +688,27 @@ fn finish_worktree(
 }
 
 fn list_worktrees(effects: &Effects, git_run_info: &GitRunInfo) -> EyreExitOr<()> {
-    smartlog(
-        effects,
-        git_run_info,
-        SmartlogOptions {
-            event_id: None,
-            revset: Some(Revset("worktrees()".to_string())),
-            resolve_revset_options: ResolveRevsetOptions::default(),
-            reverse: false,
-            exact: true,
-            include_related_commits: false,
-        },
-    )
+    let repo = Repo::from_dir(&git_run_info.working_directory)?;
+    let snapshot = get_linked_worktrees(git_run_info, &repo)?;
+    for (index, entry) in snapshot.entries.iter().enumerate() {
+        let summary = describe_worktree_summary(&repo, entry)?;
+        writeln!(
+            effects.get_output_stream(),
+            "{}",
+            effects.get_glyphs().render(summary)?
+        )?;
+        let mut path = StyledString::new();
+        path.append_styled(entry.path.to_string_lossy(), BaseColor::Black.light());
+        writeln!(
+            effects.get_output_stream(),
+            "  {}",
+            effects.get_glyphs().render(path)?
+        )?;
+        if index + 1 < snapshot.entries.len() {
+            writeln!(effects.get_output_stream())?;
+        }
+    }
+    Ok(Ok(()))
 }
 
 #[cfg(unix)]
@@ -682,6 +777,7 @@ mod worktree_skim {
     }
 
     pub fn prompt(
+        git_run_info: &GitRunInfo,
         repo: &Repo,
         snapshot: &WorktreeSnapshot,
         initial_query: &str,
@@ -702,7 +798,7 @@ mod worktree_skim {
             .iter()
             .cloned()
             .map(|entry| {
-                let (summary, preview) = describe_worktree_entry(repo, &entry)?;
+                let (summary, preview) = describe_worktree_entry(repo, git_run_info, &entry)?;
                 Ok(WorktreeSkimItem {
                     entry,
                     styled_summary: Glyphs::pretty().render(summary)?,

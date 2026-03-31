@@ -464,6 +464,9 @@ pub struct WorktreeArgs {
 #[derive(Debug, Parser)]
 pub enum WorktreeSubcommand {
     /// Create a new worktree.
+    ///
+    /// If `branchless.worktree.postCreateHook` is configured, it will be run
+    /// from inside the newly-created worktree after creation succeeds.
     Add {
         /// Create a new branch-backed worktree by first creating the provided branch.
         #[clap(value_parser, short = 'b', long = "branch")]

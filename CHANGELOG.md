@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - (#1603): added `git move --dry-run` to test in-memory rebases
 - (#1604): `git record` and `git amend` can now automatically detect and begin tracking new files (optional, disabled by default)
 - (#1632): added `git record --fixup` option, to create a fixup commit (similar to `reword --fixup`)
+- Added `branchless.worktree.postCreateHook`, which runs after `git wt add` succeeds from inside the new worktree.
 
 ### Changed
 

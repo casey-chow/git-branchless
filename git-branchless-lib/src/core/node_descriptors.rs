@@ -419,12 +419,8 @@ impl NodeDescriptor for WorktreeDescriptor<'_> {
             .find_by_head_oid(object.get_oid())
             .into_iter()
             .map(|entry| {
-                let icon = match (entry.is_current, entry.is_main) {
-                    (true, true) => "⌂ ᐅ".to_string(),
-                    (true, false) => "ᐅ".to_string(),
-                    (false, true) => "⌂".to_string(),
-                    (false, false) => "⎇".to_string(),
-                };
+                let _ = entry;
+                let icon = "ᐅ".to_string();
                 format!("{icon} {}", entry.display_name())
             })
             .collect();
