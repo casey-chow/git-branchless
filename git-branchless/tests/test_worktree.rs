@@ -69,20 +69,20 @@ fn test_wt_sw_fails_when_branch_is_not_active() -> eyre::Result<()> {
 }
 
 #[test]
-fn test_wt_sw_fails_cleanly_without_target() -> eyre::Result<()> {
+fn test_wt_sw_lists_worktrees_without_target() -> eyre::Result<()> {
     let git = make_git()?;
     git.init_repo()?;
+    let _worktree_root = set_worktree_root(&git)?;
 
-    let (stdout, stderr) = git.run_with_options(
-        &["wt", "sw"],
-        &GitRunOptions {
-            expected_exit_code: 1,
-            ..Default::default()
-        },
-    )?;
+    git.run(&["branch", "topic"])?;
+    let (_stdout, _stderr) = git.run(&["wt", "add", "topic-wt", "topic"])?;
 
-    assert_eq!(stdout, "");
-    assert!(stderr.contains("Expected a target or `git wt sw -i`."));
+    let (stdout, stderr) = git.run(&["wt", "sw"])?;
+
+    assert_eq!(stderr, "");
+    assert!(stdout.contains("master"), "stdout was: {stdout}");
+    assert!(stdout.contains("topic-wt"), "stdout was: {stdout}");
+    assert!(stdout.contains("<repo-path>"), "stdout was: {stdout}");
 
     Ok(())
 }
