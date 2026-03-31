@@ -166,7 +166,11 @@ fn print_worktree_path(effects: &Effects, action: &str, entry: &WorktreeEntry) -
 }
 
 fn print_switch_command(effects: &Effects, entry: &WorktreeEntry) -> eyre::Result<()> {
-    let path = entry.path.to_string_lossy();
+    print_cd_path(effects, &entry.path)
+}
+
+fn print_cd_path(effects: &Effects, path: &Path) -> eyre::Result<()> {
+    let path = path.to_string_lossy();
     let quoted_path = format!("'{}'", path.replace('\'', "'\"'\"'"));
     writeln!(effects.get_output_stream(), "cd {quoted_path}")?;
     Ok(())
@@ -665,6 +669,12 @@ fn finish_worktree(
     let parent_working_directory = repo
         .get_working_copy_path()
         .ok_or_else(|| eyre::eyre!("Repository does not have a working copy path"))?;
+    let should_switch_to_main_worktree =
+        canonicalize_best_effort(&git_run_info.working_directory)
+            .starts_with(canonicalize_best_effort(&entry.path));
+    if should_switch_to_main_worktree {
+        print_cd_path(effects, &parent_working_directory)?;
+    }
     let git_run_info = GitRunInfo {
         working_directory: parent_working_directory,
         ..git_run_info.clone()

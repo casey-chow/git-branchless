@@ -1,5 +1,6 @@
 use lib::testing::pty::{PtyAction, run_in_pty};
 use lib::testing::{GitRunOptions, make_git, make_git_worktree};
+use std::process::Command;
 
 const CARRIAGE_RETURN: &str = "\r";
 
@@ -208,6 +209,40 @@ fn test_wt_finish_resolves_worktree_path() -> eyre::Result<()> {
         stdout.contains("Finished worktree"),
         "stdout was: {stdout}"
     );
+
+    Ok(())
+}
+
+#[test]
+fn test_wt_finish_outputs_cd_command_when_finishing_current_worktree() -> eyre::Result<()> {
+    let git = make_git()?;
+    git.init_repo()?;
+
+    let worktree_wrapper = make_git_worktree(&git, "topic-wt")?;
+    let worktree = &worktree_wrapper.worktree;
+    let expected_main_worktree_path = std::fs::canonicalize(&git.repo_path)?;
+
+    let output = Command::new(&worktree.path_to_git)
+        .current_dir(&worktree.repo_path)
+        .args(["wt", "finish"])
+        .env_clear()
+        .envs(worktree.get_base_env(0))
+        .output()?;
+    assert!(output.status.success(), "output was: {output:?}");
+    let stdout = String::from_utf8(output.stdout)?;
+    let expected_cd_command = format!(
+        "cd '{}/'\n",
+        expected_main_worktree_path.to_string_lossy()
+    );
+    assert!(
+        stdout.starts_with(&expected_cd_command),
+        "stdout was: {stdout}"
+    );
+    assert!(
+        stdout.contains("Finished worktree"),
+        "stdout was: {stdout}"
+    );
+    assert!(!worktree.repo_path.exists());
 
     Ok(())
 }
