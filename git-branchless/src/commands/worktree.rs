@@ -549,11 +549,7 @@ fn switch_worktree(
         }
     } else {
         let Some(target) = target else {
-            writeln!(
-                effects.get_error_stream(),
-                "Expected a target or `git wt sw -i`."
-            )?;
-            return Ok(Err(ExitCode(1)));
+            return list_worktrees(effects, git_run_info);
         };
         let target_text = target.to_string();
         if let Some(entry) = snapshot.entries.iter().find(|entry| {
