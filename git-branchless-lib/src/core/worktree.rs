@@ -14,6 +14,9 @@ pub struct WorktreeEntry {
     /// Canonicalized worktree path, if available.
     pub path: PathBuf,
 
+    /// Human-friendly name for the worktree, disambiguated within the current snapshot.
+    pub display_name: String,
+
     /// The OID checked out in the worktree.
     pub head_oid: Option<NonZeroOid>,
 
@@ -35,11 +38,7 @@ impl WorktreeEntry {
 
     /// Get a stable display name for the worktree.
     pub fn display_name(&self) -> String {
-        self.path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_else(|| self.path.to_str().unwrap_or("<worktree>"))
-            .to_owned()
+        self.display_name.clone()
     }
 }
 
@@ -117,6 +116,48 @@ fn canonicalize_best_effort(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+fn get_path_display_name_candidates(path: &Path) -> Vec<String> {
+    let segments: Vec<String> = path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(segment) => Some(segment.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    if segments.is_empty() {
+        return vec![path.to_string_lossy().into_owned()];
+    }
+    (0..segments.len())
+        .rev()
+        .map(|start| segments[start..].join("/"))
+        .collect()
+}
+
+fn update_display_names(entries: &mut [WorktreeEntry]) {
+    let candidate_lists: Vec<Vec<String>> = entries
+        .iter()
+        .map(|entry| get_path_display_name_candidates(&entry.path))
+        .collect();
+
+    for (index, entry) in entries.iter_mut().enumerate() {
+        let display_name = candidate_lists[index]
+            .iter()
+            .find(|candidate| {
+                candidate_lists
+                    .iter()
+                    .enumerate()
+                    .all(|(other_index, other_candidates)| {
+                        other_index == index
+                            || !other_candidates.iter().any(|other| other == *candidate)
+                    })
+            })
+            .cloned()
+            .or_else(|| candidate_lists[index].last().cloned())
+            .unwrap_or_else(|| entry.path.to_string_lossy().into_owned());
+        entry.display_name = display_name;
+    }
+}
+
 fn parse_worktree_head_info(
     lines: &[String],
 ) -> eyre::Result<(Option<NonZeroOid>, Option<ReferenceName>)> {
@@ -168,6 +209,7 @@ fn parse_worktree_snapshot(
         let is_main = main_worktree_path.as_ref() == Some(&path);
         entries.push(WorktreeEntry {
             path,
+            display_name: String::new(),
             head_oid,
             branch_name,
             is_current,
@@ -191,6 +233,7 @@ fn parse_worktree_snapshot(
         }
     }
     flush(&mut current_path, &mut current_lines, &mut entries)?;
+    update_display_names(&mut entries);
 
     Ok(WorktreeSnapshot { entries })
 }
@@ -261,6 +304,7 @@ pub fn make_current_worktree_head(
     snapshot.current().cloned().or_else(|| {
         Some(WorktreeEntry {
             path: PathBuf::new(),
+            display_name: "<worktree>".to_owned(),
             head_oid: head_info.oid,
             branch_name: head_info.reference_name.clone(),
             is_current: true,

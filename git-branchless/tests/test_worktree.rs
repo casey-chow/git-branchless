@@ -135,6 +135,43 @@ fn test_wt_add_create_sanitizes_worktree_name() -> eyre::Result<()> {
     Ok(())
 }
 
+#[test]
+fn test_wt_list_walks_back_path_segments_until_name_is_unique() -> eyre::Result<()> {
+    let git = make_git()?;
+    git.init_repo()?;
+    let worktree_root = set_worktree_root(&git)?;
+
+    let repo_name = git
+        .repo_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap();
+    let worktree_base = std::path::Path::new(&worktree_root).join(repo_name);
+    let feature_topic = worktree_base.join("feature").join("topic");
+    let bugfix_topic = worktree_base.join("bugfix").join("topic");
+    std::fs::create_dir_all(feature_topic.parent().unwrap())?;
+    std::fs::create_dir_all(bugfix_topic.parent().unwrap())?;
+
+    git.run(&[
+        "worktree",
+        "add",
+        "--detach",
+        feature_topic.to_string_lossy().as_ref(),
+    ])?;
+    git.run(&[
+        "worktree",
+        "add",
+        "--detach",
+        bugfix_topic.to_string_lossy().as_ref(),
+    ])?;
+
+    let (stdout, _stderr) = git.run(&["wt", "list"])?;
+    assert!(stdout.contains("feature/topic"), "stdout was: {stdout}");
+    assert!(stdout.contains("bugfix/topic"), "stdout was: {stdout}");
+
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 #[ignore = "skim alternate-screen UI is not stable under the PTY test harness"]
