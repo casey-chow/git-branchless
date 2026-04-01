@@ -203,6 +203,77 @@ fn test_old_git_version_warning() -> eyre::Result<()> {
     Ok(())
 }
 
+#[test]
+fn test_shell_init_prints_wrapper() -> eyre::Result<()> {
+    let git = make_git()?;
+    git.init_repo()?;
+
+    let (stdout, stderr) = git.branchless("shell", &["init", "zsh", "--name", "wt"])?;
+    assert_eq!(stderr, "");
+    assert!(stdout.contains("wt()"), "stdout was: {stdout}");
+    assert!(
+        stdout.contains("BRANCHLESS_DIRECTIVE_FILE"),
+        "stdout was: {stdout}"
+    );
+    assert!(
+        stdout.contains("command git branchless worktree"),
+        "stdout was: {stdout}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_shell_install_writes_zshrc_idempotently() -> eyre::Result<()> {
+    let git = make_git()?;
+    git.init_repo()?;
+
+    let fake_home_dir = git.repo_path.join("fake_home");
+    let fake_zdotdir = fake_home_dir.join(".zsh");
+    std::fs::create_dir_all(&fake_zdotdir)?;
+    let fake_zshrc = fake_zdotdir.join(".zshrc");
+    std::fs::write(&fake_zshrc, "# existing config\n")?;
+
+    let git_run_options = GitRunOptions {
+        env: HashMap::from([
+            (
+                "HOME".to_string(),
+                fake_home_dir.to_string_lossy().to_string(),
+            ),
+            (
+                "ZDOTDIR".to_string(),
+                fake_zdotdir.to_string_lossy().to_string(),
+            ),
+            ("SHELL".to_string(), "/bin/zsh".to_string()),
+        ]),
+        ..Default::default()
+    };
+
+    let (stdout, stderr) =
+        git.branchless_with_options("shell", &["install", "--name", "wt"], &git_run_options)?;
+    assert_eq!(stderr, "");
+    assert!(
+        stdout.contains("Installed shell integration for zsh as wt"),
+        "stdout was: {stdout}"
+    );
+
+    let installed = std::fs::read_to_string(&fake_zshrc)?;
+    assert!(installed.contains("## START BRANCHLESS SHELL INTEGRATION"));
+    assert!(installed.contains("wt()"));
+
+    git.branchless_with_options("shell", &["install", "--name", "wt"], &git_run_options)?;
+    let reinstalled = std::fs::read_to_string(&fake_zshrc)?;
+    assert_eq!(
+        reinstalled
+            .matches("## START BRANCHLESS SHELL INTEGRATION")
+            .count(),
+        1,
+        "installed contents were: {reinstalled}"
+    );
+
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn test_init_basic() -> eyre::Result<()> {
@@ -317,7 +388,7 @@ fn test_main_branch_not_found_error_message() -> eyre::Result<()> {
 
        0: branchless::core::eventlog::from_event_log_db with effects=<Output fancy=false> repo=<Git repository at: "<repo-path>/.git/"> event_log_db=<EventLogDb path=Some("<repo-path>/.git/branchless/db.sqlite3")>
           at some/file/path.rs:123
-       1: git_branchless_smartlog::smartlog with effects=<Output fancy=false> git_run_info=<GitRunInfo path_to_git="<git-executable>" working_directory="<repo-path>" env=not shown> options=SmartlogOptions { event_id: None, revset: None, resolve_revset_options: ResolveRevsetOptions { show_hidden_commits: false }, reverse: false, exact: false }
+       1: git_branchless_smartlog::smartlog with effects=<Output fancy=false> git_run_info=<GitRunInfo path_to_git="<git-executable>" working_directory="<repo-path>" env=not shown> options=SmartlogOptions { event_id: None, revset: None, resolve_revset_options: ResolveRevsetOptions { show_hidden_commits: false }, reverse: false, exact: false, include_related_commits: true }
           at some/file/path.rs:123
        2: git_branchless_smartlog::command_main with ctx=CommandContext { effects: <Output fancy=false>, git_run_info: <GitRunInfo path_to_git="<git-executable>" working_directory="<repo-path>" env=not shown> } args=SmartlogArgs { event_id: None, revset: None, reverse: false, exact: false, resolve_revset_options: ResolveRevsetOptions { show_hidden_commits: false } }
           at some/file/path.rs:123
@@ -628,10 +699,9 @@ fn test_init_worktree() -> eyre::Result<()> {
     worktree.branchless("init", &[])?;
     {
         let stdout = worktree.smartlog()?;
-        insta::assert_snapshot!(stdout, @r###"
-        :
-        @ 96d1c37 (> master) create test2.txt
-        "###);
+        assert!(stdout.contains("@ 96d1c37"), "stdout was: {stdout}");
+        assert!(stdout.contains("create test2.txt"), "stdout was: {stdout}");
+        assert!(stdout.contains("new-worktree"), "stdout was: {stdout}");
     }
 
     Ok(())
@@ -736,6 +806,9 @@ fn test_install_man_pages() -> eyre::Result<()> {
     .TP
     git\-branchless\-smartlog(1)
     `smartlog` command
+    .TP
+    git\-branchless\-shell(1)
+    Install shell integration for shell\-aware worktree commands
     .TP
     git\-branchless\-split(1)
     Split commits

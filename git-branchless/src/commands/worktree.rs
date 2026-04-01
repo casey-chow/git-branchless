@@ -2,6 +2,7 @@
 
 use std::ffi::OsString;
 use std::fmt::Write;
+use std::fs::OpenOptions;
 #[cfg(not(unix))]
 use std::io;
 use std::path::{Path, PathBuf};
@@ -14,21 +15,21 @@ use cursive_core::utils::markup::StyledString;
 use eyre::WrapErr;
 #[cfg(not(unix))]
 use itertools::Itertools;
-use lib::core::config::get_worktree_add_cd;
 use lib::core::effects::Effects;
 use lib::core::formatting::Glyphs;
 use lib::core::node_descriptors::RelativeTimeDescriptor;
-use lib::core::worktree::{get_linked_worktrees, WorktreeEntry, WorktreeSnapshot};
+use lib::core::worktree::{WorktreeEntry, WorktreeSnapshot, get_linked_worktrees};
 use lib::git::{
     BranchType, ConfigRead, GitErrorCode, GitRunInfo, NonZeroOid, ReferenceName, Repo, RepoError,
 };
-use lib::util::{get_sh, ExitCode, EyreExitOr};
+use lib::util::{ExitCode, EyreExitOr, get_sh};
 use tracing::instrument;
 
+use git_branchless_init::SHELL_DIRECTIVE_FILE_ENV_VAR;
 use git_branchless_opts::{ResolveRevsetOptions, Revset, WorktreeArgs, WorktreeSubcommand};
 use git_branchless_revset::resolve_commits;
-use git_branchless_smartlog::{smartlog, SmartlogOptions};
-use lib::core::dag::{union_all, Dag};
+use git_branchless_smartlog::{SmartlogOptions, smartlog};
+use lib::core::dag::{Dag, union_all};
 use lib::core::eventlog::{EventLogDb, EventReplayer};
 use lib::core::repo_ext::RepoExt;
 use lib::try_exit_code;
@@ -164,14 +165,26 @@ fn print_worktree_path(effects: &Effects, action: &str, entry: &WorktreeEntry) -
     Ok(())
 }
 
-fn print_switch_command(effects: &Effects, entry: &WorktreeEntry) -> eyre::Result<()> {
-    print_cd_path(effects, &entry.path)
-}
-
-fn print_cd_path(effects: &Effects, path: &Path) -> eyre::Result<()> {
+fn get_cd_command(path: &Path) -> String {
     let path = path.to_string_lossy();
     let quoted_path = format!("'{}'", path.replace('\'', "'\"'\"'"));
-    writeln!(effects.get_output_stream(), "cd {quoted_path}")?;
+    format!("cd {quoted_path}")
+}
+
+fn get_shell_directive_path() -> Option<PathBuf> {
+    std::env::var_os(SHELL_DIRECTIVE_FILE_ENV_VAR).map(PathBuf::from)
+}
+
+fn write_shell_cd(path: &Path) -> eyre::Result<()> {
+    let directive_path = get_shell_directive_path()
+        .ok_or_else(|| eyre::eyre!("{SHELL_DIRECTIVE_FILE_ENV_VAR} is not set"))?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&directive_path)
+        .wrap_err_with(|| format!("Opening shell directive file {:?}", directive_path))?;
+    std::io::Write::write_all(&mut file, format!("{}\n", get_cd_command(path)).as_bytes())
+        .wrap_err_with(|| format!("Writing shell directive file {:?}", directive_path))?;
     Ok(())
 }
 
@@ -298,7 +311,6 @@ fn add_worktree(
     requested_name: &str,
     target: Option<&Revset>,
     new_branch: Option<&str>,
-    should_cd_override: Option<bool>,
 ) -> EyreExitOr<()> {
     let target_text = target.map(ToString::to_string);
     let target_branch_name = match target_text.as_deref() {
@@ -365,10 +377,6 @@ fn add_worktree(
         .ok_or_else(|| eyre::eyre!("Created worktree was not discoverable afterwards"))?;
     try_exit_code!(run_post_create_hook(effects, git_run_info, repo, &entry)?);
     print_worktree_path(effects, "Created worktree at:", &entry)?;
-    let should_cd = should_cd_override.unwrap_or(get_worktree_add_cd(repo)?);
-    if should_cd {
-        print_cd_path(effects, &entry.path)?;
-    }
     Ok(Ok(()))
 }
 
@@ -563,6 +571,14 @@ fn switch_worktree(
     interactive: bool,
     target: Option<&Revset>,
 ) -> EyreExitOr<()> {
+    if get_shell_directive_path().is_none() {
+        writeln!(
+            effects.get_error_stream(),
+            "`git wt sw` requires shell integration. Run `git branchless shell install` and use the installed command."
+        )?;
+        return Ok(Err(ExitCode(1)));
+    }
+
     let snapshot = get_linked_worktrees(git_run_info, repo)?;
     let selected = if interactive {
         let initial_query = target.map(ToString::to_string).unwrap_or_default();
@@ -572,7 +588,11 @@ fn switch_worktree(
         }
     } else {
         let Some(target) = target else {
-            return list_worktrees(effects, git_run_info);
+            writeln!(
+                effects.get_error_stream(),
+                "Provide a target or pass `-i/--interactive`."
+            )?;
+            return Ok(Err(ExitCode(1)));
         };
         let target_text = target.to_string();
         if let Some(entry) = snapshot.entries.iter().find(|entry| {
@@ -630,7 +650,7 @@ fn switch_worktree(
         }
     };
 
-    print_switch_command(effects, &selected)?;
+    write_shell_cd(&selected.path)?;
     Ok(Ok(()))
 }
 
@@ -691,10 +711,17 @@ fn finish_worktree(
     let should_switch_to_main_worktree = canonicalize_best_effort(&git_run_info.working_directory)
         .starts_with(canonicalize_best_effort(&entry.path));
     if should_switch_to_main_worktree {
-        print_cd_path(effects, &parent_working_directory)?;
+        if get_shell_directive_path().is_none() {
+            writeln!(
+                effects.get_error_stream(),
+                "Refusing to finish the current worktree '{}'. Run it from the installed shell command so branchless can return you to the main worktree.",
+                entry.display_name()
+            )?;
+            return Ok(Err(ExitCode(1)));
+        }
     }
     let git_run_info = GitRunInfo {
-        working_directory: parent_working_directory,
+        working_directory: parent_working_directory.clone(),
         ..git_run_info.clone()
     };
     let args = vec![
@@ -711,6 +738,9 @@ fn finish_worktree(
         "Finished worktree {}",
         entry.path.to_string_lossy()
     )?;
+    if should_switch_to_main_worktree {
+        write_shell_cd(&parent_working_directory)?;
+    }
     Ok(Ok(()))
 }
 
@@ -745,8 +775,8 @@ mod worktree_skim {
 
     use eyre::eyre;
     use skim::{
-        prelude::SkimOptionsBuilder, AnsiString, DisplayContext, ItemPreview, Matches,
-        PreviewContext, Skim, SkimItem, SkimItemReceiver, SkimItemSender,
+        AnsiString, DisplayContext, ItemPreview, Matches, PreviewContext, Skim, SkimItem,
+        SkimItemReceiver, SkimItemSender, prelude::SkimOptionsBuilder,
     };
 
     use super::*;
@@ -868,8 +898,6 @@ pub fn command_main(
     match args.subcommand {
         WorktreeSubcommand::Add {
             new_branch,
-            cd,
-            no_cd,
             name,
             target,
         } => add_worktree(
@@ -879,13 +907,6 @@ pub fn command_main(
             &name,
             target.as_ref(),
             new_branch.as_deref(),
-            if cd {
-                Some(true)
-            } else if no_cd {
-                Some(false)
-            } else {
-                None
-            },
         ),
         WorktreeSubcommand::Finish { target } => {
             finish_worktree(effects, git_run_info, &repo, target.as_deref())

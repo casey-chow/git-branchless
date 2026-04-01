@@ -9,6 +9,7 @@
 )]
 #![allow(clippy::too_many_arguments, clippy::blocks_in_conditions)]
 
+use std::env;
 use std::fmt::Write;
 use std::io::{BufRead, BufReader, Write as WriteIo, stdin, stdout};
 use std::path::{Path, PathBuf};
@@ -22,7 +23,9 @@ use lib::util::EyreExitOr;
 use path_slash::PathExt;
 use tracing::{instrument, warn};
 
-use git_branchless_opts::{InitArgs, InstallManPagesArgs, write_man_pages};
+use git_branchless_opts::{
+    InitArgs, InstallManPagesArgs, ShellArgs, ShellKind, ShellSubcommand, write_man_pages,
+};
 use lib::core::config::{
     get_default_branch_name, get_default_hooks_dir, get_main_worktree_hooks_dir,
 };
@@ -141,25 +144,35 @@ pub fn determine_hook_path(repo: &Repo, hooks_dir: &Path, hook_type: &str) -> ey
 const SHEBANG: &str = "#!/bin/sh";
 const UPDATE_MARKER_START: &str = "## START BRANCHLESS CONFIG";
 const UPDATE_MARKER_END: &str = "## END BRANCHLESS CONFIG";
+const SHELL_BLOCK_START: &str = "## START BRANCHLESS SHELL INTEGRATION";
+const SHELL_BLOCK_END: &str = "## END BRANCHLESS SHELL INTEGRATION";
 
-fn append_hook(new_lines: &mut String, hook_contents: &str) {
-    new_lines.push_str(UPDATE_MARKER_START);
-    new_lines.push('\n');
-    new_lines.push_str(hook_contents);
-    new_lines.push_str(UPDATE_MARKER_END);
-    new_lines.push('\n');
-}
+/// Environment variable used to communicate shell directives such as `cd`.
+pub const SHELL_DIRECTIVE_FILE_ENV_VAR: &str = "BRANCHLESS_DIRECTIVE_FILE";
 
 fn update_between_lines(lines: &str, updated_lines: &str) -> String {
+    update_between_lines_with_markers(lines, updated_lines, UPDATE_MARKER_START, UPDATE_MARKER_END)
+}
+
+fn update_between_lines_with_markers(
+    lines: &str,
+    updated_lines: &str,
+    start_marker: &str,
+    end_marker: &str,
+) -> String {
     let mut new_lines = String::new();
     let mut found_marker = false;
     let mut is_ignoring_lines = false;
     for line in lines.lines() {
-        if line == UPDATE_MARKER_START {
+        if line == start_marker {
             found_marker = true;
             is_ignoring_lines = true;
-            append_hook(&mut new_lines, updated_lines);
-        } else if line == UPDATE_MARKER_END {
+            new_lines.push_str(start_marker);
+            new_lines.push('\n');
+            new_lines.push_str(updated_lines);
+            new_lines.push_str(end_marker);
+            new_lines.push('\n');
+        } else if line == end_marker {
             is_ignoring_lines = false;
         } else if !is_ignoring_lines {
             new_lines.push_str(line);
@@ -169,9 +182,136 @@ fn update_between_lines(lines: &str, updated_lines: &str) -> String {
     if is_ignoring_lines {
         warn!("Unterminated branchless config comment in hook");
     } else if !found_marker {
-        append_hook(&mut new_lines, updated_lines);
+        new_lines.push_str(start_marker);
+        new_lines.push('\n');
+        new_lines.push_str(updated_lines);
+        new_lines.push_str(end_marker);
+        new_lines.push('\n');
     }
     new_lines
+}
+
+fn get_home_dir() -> eyre::Result<PathBuf> {
+    let home_dir = env::var_os("HOME").ok_or_else(|| eyre::eyre!("$HOME is not set"))?;
+    Ok(PathBuf::from(home_dir))
+}
+
+fn detect_shell_kind() -> eyre::Result<ShellKind> {
+    let shell = env::var_os("SHELL").ok_or_else(|| eyre::eyre!("$SHELL is not set"))?;
+    let shell = Path::new(&shell)
+        .file_name()
+        .and_then(|shell| shell.to_str())
+        .ok_or_else(|| eyre::eyre!("Could not parse $SHELL"))?;
+    match shell {
+        "bash" => Ok(ShellKind::Bash),
+        "zsh" => Ok(ShellKind::Zsh),
+        "fish" => Ok(ShellKind::Fish),
+        other => eyre::bail!("Unsupported shell '{other}'"),
+    }
+}
+
+fn quote_posix_single_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn generate_bash_or_zsh_script(name: &str) -> String {
+    format!(
+        r#"{name}() {{
+  local directive_file status
+  case "${{1-}}" in
+    sw|switch|finish)
+      directive_file="$(mktemp "${{TMPDIR:-/tmp}}/branchless.XXXXXX")" || return 1
+      {env_var}="$directive_file" command git branchless worktree "$@"
+      status=$?
+      if [ -s "$directive_file" ]; then
+        . "$directive_file"
+      fi
+      rm -f "$directive_file"
+      return $status
+      ;;
+    *)
+      command git branchless worktree "$@"
+      ;;
+  esac
+}}
+"#,
+        name = name,
+        env_var = SHELL_DIRECTIVE_FILE_ENV_VAR,
+    )
+}
+
+fn generate_fish_script(name: &str) -> String {
+    format!(
+        r#"function {name}
+    switch "$argv[1]"
+        case sw switch finish
+            set -l directive_file (mktemp (string join "" (set -q TMPDIR; and echo $TMPDIR; or echo /tmp) "/branchless.XXXXXX"))
+            or return 1
+
+            env {env_var}="$directive_file" command git branchless worktree $argv
+            set -l status_code $status
+
+            if test -s "$directive_file"
+                source "$directive_file"
+            end
+
+            rm -f "$directive_file"
+            return $status_code
+        case '*'
+            command git branchless worktree $argv
+    end
+end
+"#,
+        name = name,
+        env_var = SHELL_DIRECTIVE_FILE_ENV_VAR,
+    )
+}
+
+fn get_shell_script(shell: ShellKind, name: &str) -> String {
+    match shell {
+        ShellKind::Bash | ShellKind::Zsh => generate_bash_or_zsh_script(name),
+        ShellKind::Fish => generate_fish_script(name),
+    }
+}
+
+fn install_shell_script(shell: ShellKind, name: &str) -> eyre::Result<PathBuf> {
+    let home_dir = get_home_dir()?;
+    match shell {
+        ShellKind::Bash => {
+            let rc_path = home_dir.join(".bashrc");
+            let existing = std::fs::read_to_string(&rc_path).unwrap_or_default();
+            let updated = update_between_lines_with_markers(
+                &existing,
+                &get_shell_script(shell, name),
+                SHELL_BLOCK_START,
+                SHELL_BLOCK_END,
+            );
+            std::fs::write(&rc_path, updated)?;
+            Ok(rc_path)
+        }
+        ShellKind::Zsh => {
+            let zdotdir = env::var_os("ZDOTDIR")
+                .map(PathBuf::from)
+                .unwrap_or(home_dir);
+            let rc_path = zdotdir.join(".zshrc");
+            let existing = std::fs::read_to_string(&rc_path).unwrap_or_default();
+            let updated = update_between_lines_with_markers(
+                &existing,
+                &get_shell_script(shell, name),
+                SHELL_BLOCK_START,
+                SHELL_BLOCK_END,
+            );
+            std::fs::write(&rc_path, updated)?;
+            Ok(rc_path)
+        }
+        ShellKind::Fish => {
+            let functions_dir = home_dir.join(".config").join("fish").join("functions");
+            std::fs::create_dir_all(&functions_dir)?;
+            let path = functions_dir.join(format!("{name}.fish"));
+            std::fs::write(&path, get_shell_script(shell, name))?;
+            Ok(path)
+        }
+    }
 }
 
 #[instrument]
@@ -697,9 +837,47 @@ pub fn command_install_man_pages(ctx: CommandContext, args: InstallManPagesArgs)
     Ok(Ok(()))
 }
 
+/// Manage shell integration for shell-aware worktree commands.
+#[instrument]
+pub fn command_shell(ctx: CommandContext, args: ShellArgs) -> EyreExitOr<()> {
+    let CommandContext { effects, .. } = ctx;
+    match args.subcommand {
+        ShellSubcommand::Init { shell, name } => {
+            write!(
+                effects.get_output_stream(),
+                "{}",
+                get_shell_script(shell, &name)
+            )?;
+            Ok(Ok(()))
+        }
+        ShellSubcommand::Install { shell, name } => {
+            let shell = match shell {
+                Some(shell) => shell,
+                None => detect_shell_kind()?,
+            };
+            let installed_path = install_shell_script(shell, &name)?;
+            writeln!(
+                effects.get_output_stream(),
+                "Installed shell integration for {} as {} at {}",
+                match shell {
+                    ShellKind::Bash => "bash",
+                    ShellKind::Zsh => "zsh",
+                    ShellKind::Fish => "fish",
+                },
+                name,
+                quote_posix_single_quoted(&installed_path.to_string_lossy())
+            )?;
+            Ok(Ok(()))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{UPDATE_MARKER_END, UPDATE_MARKER_START, update_between_lines};
+    use super::{
+        SHELL_BLOCK_END, SHELL_BLOCK_START, UPDATE_MARKER_END, UPDATE_MARKER_START,
+        update_between_lines, update_between_lines_with_markers,
+    };
 
     #[test]
     fn test_update_between_lines() {
@@ -733,5 +911,31 @@ contents 3
             ),
             expected
         )
+    }
+
+    #[test]
+    fn test_update_between_lines_with_custom_markers() {
+        let input = format!(
+            "\
+hello
+{SHELL_BLOCK_START}
+old
+{SHELL_BLOCK_END}
+goodbye
+"
+        );
+        let expected = format!(
+            "\
+hello
+{SHELL_BLOCK_START}
+new
+{SHELL_BLOCK_END}
+goodbye
+"
+        );
+        assert_eq!(
+            update_between_lines_with_markers(&input, "new\n", SHELL_BLOCK_START, SHELL_BLOCK_END),
+            expected
+        );
     }
 }
