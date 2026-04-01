@@ -571,6 +571,10 @@ fn switch_worktree(
     interactive: bool,
     target: Option<&Revset>,
 ) -> EyreExitOr<()> {
+    if !interactive && target.is_none() {
+        return list_worktrees(effects, git_run_info);
+    }
+
     if get_shell_directive_path().is_none() {
         writeln!(
             effects.get_error_stream(),
@@ -588,11 +592,7 @@ fn switch_worktree(
         }
     } else {
         let Some(target) = target else {
-            writeln!(
-                effects.get_error_stream(),
-                "Provide a target or pass `-i/--interactive`."
-            )?;
-            return Ok(Err(ExitCode(1)));
+            unreachable!("handled no-target case above");
         };
         let target_text = target.to_string();
         if let Some(entry) = snapshot.entries.iter().find(|entry| {
