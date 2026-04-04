@@ -180,6 +180,8 @@ fn command_main(ctx: CommandContext, opts: Opts) -> EyreExitOr<()> {
             )?
         }
 
+        Command::Shell(args) => git_branchless_init::command_shell(ctx, args)?,
+
         Command::Smartlog(args) => git_branchless_smartlog::command_main(ctx, args)?,
 
         Command::Snapshot { subcommand } => match subcommand {

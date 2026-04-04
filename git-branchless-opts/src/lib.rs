@@ -270,6 +270,53 @@ pub struct InstallManPagesArgs {
     pub path: PathBuf,
 }
 
+/// Supported shells for shell integration.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ShellKind {
+    /// Bash shell.
+    Bash,
+
+    /// Zsh shell.
+    Zsh,
+
+    /// Fish shell.
+    Fish,
+}
+
+/// Arguments for shell integration management.
+#[derive(Debug, Parser)]
+pub struct ShellArgs {
+    /// The subcommand to run.
+    #[clap(subcommand)]
+    pub subcommand: ShellSubcommand,
+}
+
+/// `shell` subcommands.
+#[derive(Debug, Parser)]
+pub enum ShellSubcommand {
+    /// Print shell integration for the specified shell.
+    Init {
+        /// The shell to generate integration for.
+        #[clap(value_enum)]
+        shell: ShellKind,
+
+        /// The installed command name. Defaults to `git-wt`.
+        #[clap(long = "name", default_value = "git-wt")]
+        name: String,
+    },
+
+    /// Install shell integration for the specified shell or the current shell.
+    Install {
+        /// The shell to install integration for. Defaults to the current shell.
+        #[clap(value_enum)]
+        shell: Option<ShellKind>,
+
+        /// The installed command name. Defaults to `git-wt`.
+        #[clap(long = "name", default_value = "git-wt")]
+        name: String,
+    },
+}
+
 /// Query the commit graph using the "revset" language and print matching
 /// commits.
 ///
@@ -471,14 +518,6 @@ pub enum WorktreeSubcommand {
         /// Create a new branch-backed worktree by first creating the provided branch.
         #[clap(value_parser, short = 'b', long = "branch")]
         new_branch: Option<String>,
-
-        /// Print a shell-ready `cd` command for the created worktree.
-        #[clap(action, long = "cd", overrides_with = "no_cd")]
-        cd: bool,
-
-        /// Do not print a shell-ready `cd` command for the created worktree.
-        #[clap(action, long = "no-cd", overrides_with = "cd")]
-        no_cd: bool,
 
         /// The worktree name to create under the configured worktree root.
         #[clap(value_parser)]
@@ -725,6 +764,9 @@ pub enum Command {
     /// `smartlog` command.
     Smartlog(SmartlogArgs),
 
+    /// Install shell integration for shell-aware worktree commands.
+    Shell(ShellArgs),
+
     #[clap(hide = true)]
     /// Manage working copy snapshots.
     Snapshot {
@@ -804,6 +846,9 @@ pub enum Command {
     /// Run a command on each commit in a given set and aggregate the results.
     Test(TestArgs),
 
+    /// Manage linked worktrees with branchless defaults.
+    #[clap(visible_alias = "wt")]
+    Worktree(WorktreeArgs),
     /// Browse or return to a previous state of the repository.
     Undo {
         /// Interactively browse through previous states of the repository

@@ -1,5 +1,5 @@
-use lib::testing::pty::{run_in_pty, PtyAction};
-use lib::testing::{make_git, make_git_worktree, GitRunOptions};
+use lib::testing::pty::{PtyAction, run_in_pty};
+use lib::testing::{GitRunOptions, make_git, make_git_worktree};
 use std::process::Command;
 
 const CARRIAGE_RETURN: &str = "\r";
@@ -58,7 +58,7 @@ fn test_worktree_add_resolves_revset_target_before_calling_git() -> eyre::Result
 }
 
 #[test]
-fn test_wt_sw_fails_when_branch_is_not_active() -> eyre::Result<()> {
+fn test_wt_sw_fails_without_shell_integration() -> eyre::Result<()> {
     let git = make_git()?;
     git.init_repo()?;
     let _worktree_root = set_worktree_root(&git)?;
@@ -73,26 +73,59 @@ fn test_wt_sw_fails_when_branch_is_not_active() -> eyre::Result<()> {
     )?;
 
     assert_eq!(stdout, "");
+    assert!(stderr.contains("requires shell integration"));
+
+    Ok(())
+}
+
+#[test]
+fn test_wt_sw_fails_when_branch_is_not_active() -> eyre::Result<()> {
+    let git = make_git()?;
+    git.init_repo()?;
+    let _worktree_root = set_worktree_root(&git)?;
+
+    git.run(&["branch", "topic"])?;
+    let directive_file = git.repo_path.join("branchless-directive.sh");
+    let (stdout, stderr) = git.branchless_with_options(
+        "worktree",
+        &["sw", "topic"],
+        &GitRunOptions {
+            env: std::collections::HashMap::from([(
+                "BRANCHLESS_DIRECTIVE_FILE".to_string(),
+                directive_file.to_string_lossy().to_string(),
+            )]),
+            expected_exit_code: 1,
+            ..Default::default()
+        },
+    )?;
+
+    assert_eq!(stdout, "");
     assert!(stderr.contains("Branch 'topic' is not active in any linked worktree."));
 
     Ok(())
 }
 
 #[test]
-fn test_wt_sw_lists_worktrees_without_target() -> eyre::Result<()> {
+fn test_wt_sw_requires_target_or_interactive() -> eyre::Result<()> {
     let git = make_git()?;
     git.init_repo()?;
-    let _worktree_root = set_worktree_root(&git)?;
+    let directive_file = git.repo_path.join("branchless-directive.sh");
 
-    git.run(&["branch", "topic"])?;
-    let (_stdout, _stderr) = git.run(&["wt", "add", "topic-wt", "topic"])?;
+    let (stdout, stderr) = git.branchless_with_options(
+        "worktree",
+        &["sw"],
+        &GitRunOptions {
+            env: std::collections::HashMap::from([(
+                "BRANCHLESS_DIRECTIVE_FILE".to_string(),
+                directive_file.to_string_lossy().to_string(),
+            )]),
+            expected_exit_code: 1,
+            ..Default::default()
+        },
+    )?;
 
-    let (stdout, stderr) = git.run(&["wt", "sw"])?;
-
-    assert_eq!(stderr, "");
-    assert!(stdout.contains("master"), "stdout was: {stdout}");
-    assert!(stdout.contains("topic-wt"), "stdout was: {stdout}");
-    assert!(stdout.contains("<repo-path>"), "stdout was: {stdout}");
+    assert_eq!(stdout, "");
+    assert!(stderr.contains("Provide a target or pass `-i/--interactive`."));
 
     Ok(())
 }
@@ -101,10 +134,16 @@ fn test_wt_sw_lists_worktrees_without_target() -> eyre::Result<()> {
 fn test_wt_sw_fails_cleanly_for_unresolved_target() -> eyre::Result<()> {
     let git = make_git()?;
     git.init_repo()?;
+    let directive_file = git.repo_path.join("branchless-directive.sh");
 
-    let (stdout, stderr) = git.run_with_options(
-        &["wt", "sw", "definitely-missing-target"],
+    let (stdout, stderr) = git.branchless_with_options(
+        "worktree",
+        &["sw", "definitely-missing-target"],
         &GitRunOptions {
+            env: std::collections::HashMap::from([(
+                "BRANCHLESS_DIRECTIVE_FILE".to_string(),
+                directive_file.to_string_lossy().to_string(),
+            )]),
             expected_exit_code: 1,
             ..Default::default()
         },
@@ -161,7 +200,7 @@ fn test_wt_sw_interactive_selects_existing_worktree() -> eyre::Result<()> {
 }
 
 #[test]
-fn test_wt_sw_outputs_cd_command() -> eyre::Result<()> {
+fn test_wt_sw_writes_shell_directive() -> eyre::Result<()> {
     let git = make_git()?;
     git.init_repo()?;
     let _worktree_root = set_worktree_root(&git)?;
@@ -170,9 +209,22 @@ fn test_wt_sw_outputs_cd_command() -> eyre::Result<()> {
     let (stdout, _stderr) = git.run(&["wt", "add", "topic-wt", "topic"])?;
     assert!(stdout.contains("Created worktree at:"));
 
-    let (stdout, _stderr) = git.run(&["wt", "sw", "topic"])?;
-    assert!(stdout.starts_with("cd '"), "stdout was: {stdout}");
-    assert!(stdout.contains("topic-wt"), "stdout was: {stdout}");
+    let directive_file = git.repo_path.join("branchless-directive.sh");
+    let (stdout, _stderr) = git.branchless_with_options(
+        "worktree",
+        &["sw", "topic"],
+        &GitRunOptions {
+            env: std::collections::HashMap::from([(
+                "BRANCHLESS_DIRECTIVE_FILE".to_string(),
+                directive_file.to_string_lossy().to_string(),
+            )]),
+            ..Default::default()
+        },
+    )?;
+    assert_eq!(stdout, "");
+    let directive = std::fs::read_to_string(&directive_file)?;
+    assert!(directive.starts_with("cd '"), "directive was: {directive}");
+    assert!(directive.contains("topic-wt"), "directive was: {directive}");
 
     Ok(())
 }
@@ -188,9 +240,24 @@ fn test_wt_sw_resolves_worktree_name() -> eyre::Result<()> {
     git.run(&["checkout", "master"])?;
     git.run(&["wt", "add", "manual-reload", &test1_oid.to_string()])?;
 
-    let (stdout, _stderr) = git.run(&["wt", "sw", "manual-reload"])?;
-    assert!(stdout.starts_with("cd '"), "stdout was: {stdout}");
-    assert!(stdout.contains("manual-reload"), "stdout was: {stdout}");
+    let directive_file = git.repo_path.join("branchless-directive.sh");
+    let (stdout, _stderr) = git.branchless_with_options(
+        "worktree",
+        &["sw", "manual-reload"],
+        &GitRunOptions {
+            env: std::collections::HashMap::from([(
+                "BRANCHLESS_DIRECTIVE_FILE".to_string(),
+                directive_file.to_string_lossy().to_string(),
+            )]),
+            ..Default::default()
+        },
+    )?;
+    assert_eq!(stdout, "");
+    let directive = std::fs::read_to_string(&directive_file)?;
+    assert!(
+        directive.contains("manual-reload"),
+        "directive was: {directive}"
+    );
 
     Ok(())
 }
@@ -222,13 +289,12 @@ fn test_wt_finish_resolves_worktree_path() -> eyre::Result<()> {
 }
 
 #[test]
-fn test_wt_finish_outputs_cd_command_when_finishing_current_worktree() -> eyre::Result<()> {
+fn test_wt_finish_refuses_current_worktree() -> eyre::Result<()> {
     let git = make_git()?;
     git.init_repo()?;
 
     let worktree_wrapper = make_git_worktree(&git, "topic-wt")?;
     let worktree = &worktree_wrapper.worktree;
-    let expected_main_worktree_path = std::fs::canonicalize(&git.repo_path)?;
 
     let output = Command::new(&worktree.path_to_git)
         .current_dir(&worktree.repo_path)
@@ -236,18 +302,49 @@ fn test_wt_finish_outputs_cd_command_when_finishing_current_worktree() -> eyre::
         .env_clear()
         .envs(worktree.get_base_env(0))
         .output()?;
+    assert!(!output.status.success(), "output was: {output:?}");
+    let stdout = String::from_utf8(output.stdout)?;
+    let stderr = String::from_utf8(output.stderr)?;
+    assert_eq!(stdout, "", "stdout was: {stdout}");
+    assert!(
+        stderr.contains("Run it from the installed shell command"),
+        "stderr was: {stderr}"
+    );
+    assert!(worktree.repo_path.exists());
+
+    Ok(())
+}
+
+#[test]
+fn test_wt_finish_current_worktree_writes_shell_directive() -> eyre::Result<()> {
+    let git = make_git()?;
+    git.init_repo()?;
+
+    let worktree_wrapper = make_git_worktree(&git, "topic-wt")?;
+    let worktree = &worktree_wrapper.worktree;
+    let directive_file = git.repo_path.join("branchless-finish-directive.sh");
+
+    let output = Command::new(&worktree.path_to_git)
+        .current_dir(&worktree.repo_path)
+        .args(["branchless", "worktree", "finish"])
+        .env_clear()
+        .envs(worktree.get_base_env(0))
+        .env("BRANCHLESS_DIRECTIVE_FILE", &directive_file)
+        .output()?;
     assert!(output.status.success(), "output was: {output:?}");
     let stdout = String::from_utf8(output.stdout)?;
-    let expected_cd_command = format!("cd '{}/'\n", expected_main_worktree_path.to_string_lossy());
-    assert!(
-        stdout.starts_with(&expected_cd_command),
-        "stdout was: {stdout}"
-    );
+    let stderr = String::from_utf8(output.stderr)?;
+
+    assert_eq!(stderr, "", "stderr was: {stderr}");
     assert!(stdout.contains("Finished worktree"), "stdout was: {stdout}");
+    let directive = std::fs::read_to_string(&directive_file)?;
+    assert!(directive.starts_with("cd '"), "directive was: {directive}");
     assert!(!worktree.repo_path.exists());
 
     Ok(())
 }
+
+#[test]
 fn test_wt_list_uses_smartlog_for_worktrees() -> eyre::Result<()> {
     let git = make_git()?;
     git.init_repo()?;
@@ -302,75 +399,6 @@ fn test_wt_add_runs_post_create_hook_from_config() -> eyre::Result<()> {
         recorded_pwd.trim_end(),
         canonical_worktree_path.to_string_lossy()
     );
-
-    Ok(())
-}
-
-#[test]
-fn test_wt_add_outputs_cd_command_with_flag() -> eyre::Result<()> {
-    let git = make_git()?;
-    git.init_repo()?;
-    let _worktree_root = set_worktree_root(&git)?;
-
-    let (stdout, _stderr) = git.run(&["wt", "add", "--cd", "topic-wt"])?;
-    assert!(
-        stdout.contains("Created worktree at:"),
-        "stdout was: {stdout}"
-    );
-    assert!(stdout.contains("\ncd '"), "stdout was: {stdout}");
-    assert!(stdout.contains("topic-wt"), "stdout was: {stdout}");
-
-    Ok(())
-}
-
-#[test]
-fn test_wt_add_outputs_cd_command_with_config() -> eyre::Result<()> {
-    let git = make_git()?;
-    git.init_repo()?;
-    let _worktree_root = set_worktree_root(&git)?;
-    git.run(&["config", "branchless.worktree.add.cd", "true"])?;
-
-    let (stdout, _stderr) = git.run(&["wt", "add", "topic-wt"])?;
-    assert!(
-        stdout.contains("Created worktree at:"),
-        "stdout was: {stdout}"
-    );
-    assert!(stdout.contains("\ncd '"), "stdout was: {stdout}");
-    assert!(stdout.contains("topic-wt"), "stdout was: {stdout}");
-
-    Ok(())
-}
-
-#[test]
-fn test_wt_add_no_cd_flag_overrides_config() -> eyre::Result<()> {
-    let git = make_git()?;
-    git.init_repo()?;
-    let _worktree_root = set_worktree_root(&git)?;
-    git.run(&["config", "branchless.worktree.add.cd", "true"])?;
-
-    let (stdout, _stderr) = git.run(&["wt", "add", "--no-cd", "topic-wt"])?;
-    assert!(
-        stdout.contains("Created worktree at:"),
-        "stdout was: {stdout}"
-    );
-    assert!(!stdout.contains("\ncd '"), "stdout was: {stdout}");
-
-    Ok(())
-}
-
-#[test]
-fn test_wt_add_cd_flag_overrides_config() -> eyre::Result<()> {
-    let git = make_git()?;
-    git.init_repo()?;
-    let _worktree_root = set_worktree_root(&git)?;
-    git.run(&["config", "branchless.worktree.add.cd", "false"])?;
-
-    let (stdout, _stderr) = git.run(&["wt", "add", "--cd", "topic-wt"])?;
-    assert!(
-        stdout.contains("Created worktree at:"),
-        "stdout was: {stdout}"
-    );
-    assert!(stdout.contains("\ncd '"), "stdout was: {stdout}");
 
     Ok(())
 }
