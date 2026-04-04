@@ -100,6 +100,7 @@ fn render_cursor_smartlog(
                 repo,
                 &head_info,
                 &references_snapshot,
+                None,
                 &Redactor::Disabled,
             )?,
             &mut DifferentialRevisionDescriptor::new(repo, &Redactor::Disabled)?,
