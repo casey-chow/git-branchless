@@ -152,7 +152,7 @@ fn describe_event_cursor(
             &mut CommitOidDescriptor::new(true)?,
             &mut RelativeTimeDescriptor::new(repo, now)?,
             &mut ObsolescenceExplanationDescriptor::new(event_replayer, event_cursor)?,
-            &mut BranchesDescriptor::new(repo, head_info, references_snapshot, redactor)?,
+            &mut BranchesDescriptor::new(repo, head_info, references_snapshot, None, redactor)?,
             &mut DifferentialRevisionDescriptor::new(repo, redactor)?,
             &mut CommitMessageDescriptor::new(redactor)?,
         ],

@@ -34,8 +34,9 @@ use lib::core::formatting::Pluralize;
 use lib::core::node_descriptors::{
     BranchesDescriptor, CommitMessageDescriptor, CommitOidDescriptor,
     DifferentialRevisionDescriptor, ObsolescenceExplanationDescriptor, Redactor,
-    RelativeTimeDescriptor,
+    RelativeTimeDescriptor, WorktreeDescriptor,
 };
+use lib::core::worktree::get_linked_worktrees;
 use lib::git::{GitRunInfo, Repo};
 
 pub use graph::{SmartlogGraph, make_smartlog_graph};
@@ -798,6 +799,11 @@ pub fn smartlog(
         event_cursor,
         &references_snapshot,
     )?;
+    let worktree_snapshot = if event_id.is_none() {
+        get_linked_worktrees(git_run_info, &repo)?
+    } else {
+        Default::default()
+    };
 
     let revset = match revset {
         Some(revset) => revset,
@@ -814,6 +820,16 @@ pub fn smartlog(
                 return Ok(Err(ExitCode(1)));
             }
         };
+    let commits = if event_id.is_none() && !exact {
+        commits.union(
+            &worktree_snapshot
+                .active_detached_head_oids()
+                .into_iter()
+                .collect(),
+        )
+    } else {
+        commits
+    };
 
     let graph = make_smartlog_graph(
         effects,
@@ -852,8 +868,10 @@ pub fn smartlog(
                 &repo,
                 &head_info,
                 &references_snapshot,
+                Some(&worktree_snapshot),
                 &Redactor::Disabled,
             )?,
+            &mut WorktreeDescriptor::new(&worktree_snapshot)?,
             &mut DifferentialRevisionDescriptor::new(&repo, &Redactor::Disabled)?,
             &mut CommitMessageDescriptor::new(&Redactor::Disabled)?,
         ],
