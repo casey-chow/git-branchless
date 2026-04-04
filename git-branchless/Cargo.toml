@@ -59,6 +59,9 @@ tracing-subscriber = { workspace = true }
 [dev-dependencies]
 insta = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+skim = { workspace = true }
+
 [features]
 man-pages = []
 
@@ -122,3 +125,6 @@ name = "test_undo"
 
 [[test]]
 name = "test_wrap"
+
+[[test]]
+name = "test_worktree"

@@ -115,6 +115,13 @@ pub fn get_smartlog_reverse(repo: &Repo) -> eyre::Result<bool> {
         .get_or("branchless.smartlog.reverse", false)
 }
 
+/// If `true`, print a shell-ready `cd` command after creating a new worktree.
+#[instrument]
+pub fn get_worktree_add_cd(repo: &Repo) -> eyre::Result<bool> {
+    repo.get_readonly_config()?
+        .get_or("branchless.worktree.add.cd", false)
+}
+
 /// Get the default comment character.
 #[instrument]
 pub fn get_comment_char(repo: &Repo) -> eyre::Result<char> {

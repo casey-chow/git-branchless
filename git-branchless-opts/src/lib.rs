@@ -452,6 +452,67 @@ pub struct TestArgs {
     pub subcommand: TestSubcommand,
 }
 
+/// Arguments for worktree management.
+#[derive(Debug, Parser)]
+pub struct WorktreeArgs {
+    /// The subcommand to run.
+    #[clap(subcommand)]
+    pub subcommand: WorktreeSubcommand,
+}
+
+/// `worktree` subcommands.
+#[derive(Debug, Parser)]
+pub enum WorktreeSubcommand {
+    /// Create a new worktree.
+    ///
+    /// If `branchless.worktree.postCreateHook` is configured, it will be run
+    /// from inside the newly-created worktree after creation succeeds.
+    Add {
+        /// Create a new branch-backed worktree by first creating the provided branch.
+        #[clap(value_parser, short = 'b', long = "branch")]
+        new_branch: Option<String>,
+
+        /// Print a shell-ready `cd` command for the created worktree.
+        #[clap(action, long = "cd", overrides_with = "no_cd")]
+        cd: bool,
+
+        /// Do not print a shell-ready `cd` command for the created worktree.
+        #[clap(action, long = "no-cd", overrides_with = "cd")]
+        no_cd: bool,
+
+        /// The worktree name to create under the configured worktree root.
+        #[clap(value_parser)]
+        name: String,
+
+        /// The branch, commit, or revset to materialize in the new worktree.
+        ///
+        /// When `-b/--branch` is set, this is treated as the optional start-point.
+        #[clap(value_parser)]
+        target: Option<Revset>,
+    },
+
+    /// Remove a worktree after verifying it is safe to do so.
+    Finish {
+        /// The branch or worktree path/name to finish.
+        #[clap(value_parser)]
+        target: Option<String>,
+    },
+
+    /// Show a smartlog filtered to commits checked out in linked worktrees.
+    List,
+
+    /// Reuse an existing worktree and print its path.
+    #[clap(visible_alias = "sw")]
+    Switch {
+        /// Interactively select an existing active worktree.
+        #[clap(action, short = 'i', long = "interactive")]
+        interactive: bool,
+
+        /// The existing target to switch to.
+        #[clap(value_parser)]
+        target: Option<Revset>,
+    },
+}
 /// FIXME: write man-page text
 #[derive(Debug, Parser)]
 pub enum Command {

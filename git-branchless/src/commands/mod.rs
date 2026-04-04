@@ -8,6 +8,7 @@ mod restack;
 mod snapshot;
 mod split;
 mod sync;
+mod worktree;
 mod wrap;
 
 use git_branchless_invoke::CommandContext;
@@ -238,6 +239,8 @@ fn command_main(ctx: CommandContext, opts: Opts) -> EyreExitOr<()> {
         )?,
 
         Command::Test(args) => git_branchless_test::command_main(ctx, args)?,
+
+        Command::Worktree(args) => worktree::command_main(&effects, &git_run_info, args)?,
 
         Command::Undo { interactive, yes } => {
             git_branchless_undo::undo(&effects, &git_run_info, interactive, yes)?
