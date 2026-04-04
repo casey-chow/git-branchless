@@ -141,6 +141,7 @@ fn describe_event_cursor(
         event_cursor,
         &commits,
         false,
+        true,
     )?;
     let graph_lines = render_graph(
         &effects,
