@@ -731,6 +731,10 @@ pub enum Command {
         )]
         pull: bool,
 
+        /// Attempt to also sync the checked-out branches or commits in other linked worktrees.
+        #[clap(action, short = 't', long = "worktrees")]
+        sync_worktrees: bool,
+
         /// Options for moving commits.
         #[clap(flatten)]
         move_options: MoveOptions,

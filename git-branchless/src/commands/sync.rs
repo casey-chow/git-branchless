@@ -8,6 +8,7 @@ use std::time::SystemTime;
 use itertools::Itertools;
 use lib::core::check_out::CheckOutCommitOptions;
 use lib::core::repo_ext::RepoExt;
+use lib::core::worktree::get_linked_worktrees;
 use lib::util::{ExitCode, EyreExitOr};
 use rayon::{ThreadPool, ThreadPoolBuilder};
 
@@ -50,11 +51,97 @@ pub fn sync(
     effects: &Effects,
     git_run_info: &GitRunInfo,
     pull: bool,
+    sync_worktrees: bool,
     move_options: &MoveOptions,
     revsets: Vec<Revset>,
     resolve_revset_options: &ResolveRevsetOptions,
 ) -> EyreExitOr<()> {
-    let repo = Repo::from_current_dir()?;
+    let repo = Repo::from_dir(&git_run_info.working_directory)?;
+    if sync_worktrees {
+        return sync_linked_worktrees(
+            effects,
+            git_run_info,
+            &repo,
+            pull,
+            move_options,
+            revsets,
+            resolve_revset_options,
+        );
+    }
+
+    sync_single_worktree(
+        effects,
+        git_run_info,
+        pull,
+        move_options,
+        revsets,
+        resolve_revset_options,
+    )
+}
+
+fn sync_linked_worktrees(
+    effects: &Effects,
+    git_run_info: &GitRunInfo,
+    repo: &Repo,
+    pull: bool,
+    move_options: &MoveOptions,
+    revsets: Vec<Revset>,
+    resolve_revset_options: &ResolveRevsetOptions,
+) -> EyreExitOr<()> {
+    let worktree_snapshot = get_linked_worktrees(git_run_info, repo)?;
+    let current_head_info = repo.get_head_info()?;
+    let current_revsets = if revsets.is_empty() {
+        current_head_info
+            .oid
+            .map(|oid| vec![Revset(oid.to_string())])
+            .unwrap_or_default()
+    } else {
+        revsets
+    };
+
+    try_exit_code!(sync_single_worktree(
+        effects,
+        git_run_info,
+        pull,
+        move_options,
+        current_revsets,
+        resolve_revset_options,
+    )?);
+
+    for entry in &worktree_snapshot.entries {
+        if entry.is_current {
+            continue;
+        }
+
+        let Some(head_oid) = entry.head_oid else {
+            continue;
+        };
+        let worktree_git_run_info = GitRunInfo {
+            working_directory: entry.path.clone(),
+            ..git_run_info.clone()
+        };
+        try_exit_code!(sync_single_worktree(
+            effects,
+            &worktree_git_run_info,
+            false,
+            move_options,
+            vec![Revset(head_oid.to_string())],
+            resolve_revset_options,
+        )?);
+    }
+
+    Ok(Ok(()))
+}
+
+fn sync_single_worktree(
+    effects: &Effects,
+    git_run_info: &GitRunInfo,
+    pull: bool,
+    move_options: &MoveOptions,
+    revsets: Vec<Revset>,
+    resolve_revset_options: &ResolveRevsetOptions,
+) -> EyreExitOr<()> {
+    let repo = Repo::from_dir(&git_run_info.working_directory)?;
     let conn = repo.get_db_conn()?;
     let event_log_db = EventLogDb::new(&conn)?;
     let now = SystemTime::now();

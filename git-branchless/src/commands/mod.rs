@@ -223,6 +223,7 @@ fn command_main(ctx: CommandContext, opts: Opts) -> EyreExitOr<()> {
 
         Command::Sync {
             pull,
+            sync_worktrees,
             move_options,
             revsets,
             resolve_revset_options,
@@ -230,6 +231,7 @@ fn command_main(ctx: CommandContext, opts: Opts) -> EyreExitOr<()> {
             &effects,
             &git_run_info,
             pull,
+            sync_worktrees,
             &move_options,
             revsets,
             &resolve_revset_options,

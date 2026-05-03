@@ -1,5 +1,6 @@
 use lib::testing::{
     GitInitOptions, GitRunOptions, GitWrapperWithRemoteRepo, make_git, make_git_with_remote_repo,
+    make_git_worktree,
     remove_nondeterministic_lines,
 };
 
@@ -46,9 +47,11 @@ fn test_sync_basic() -> eyre::Result<()> {
         let (stdout, stderr) = git.branchless("sync", &[])?;
         insta::assert_snapshot!(stderr, @r###"
         branchless: creating working copy snapshot
+        branchless: processing 1 update: ref HEAD
         Switched to branch 'master'
         branchless: processing checkout
         branchless: creating working copy snapshot
+        branchless: processing 1 update: ref HEAD
         Switched to branch 'master'
         branchless: processing checkout
         "###);
@@ -467,6 +470,7 @@ fn test_sync_no_delete_main_branch() -> eyre::Result<()> {
         branchless: processing 2 updates: branch master, branch should-be-deleted
         branchless: creating working copy snapshot
         branchless: running command: <git-executable> checkout master --
+        branchless: processing 1 update: ref HEAD
         branchless: processing checkout
         :
         @ 96d1c37 (> master) create test2.txt
@@ -630,6 +634,55 @@ fn test_sync_checked_out_main_with_dirty_working_copy() -> eyre::Result<()> {
         Not updating branch master at 62fc20d create test1.txt
         branchless: running command: <git-executable> rebase 62fc20d2a290daea0d52bdc2ed2ad4be6491010e
         "###);
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_sync_worktrees_rebases_checked_out_branches_in_other_worktrees() -> eyre::Result<()> {
+    let git = make_git()?;
+
+    if !git.supports_reference_transactions()? {
+        return Ok(());
+    }
+    git.init_repo()?;
+
+    git.commit_file("test1", 1)?;
+    let worktree_wrapper = make_git_worktree(&git, "topic-wt")?;
+    let topic_worktree = &worktree_wrapper.worktree;
+
+    topic_worktree.run(&["checkout", "-b", "topic"])?;
+    let original_topic_oid = topic_worktree.commit_file("topic", 2)?;
+
+    git.run(&["checkout", "master"])?;
+    git.commit_file("test2", 3)?;
+
+    {
+        let stdout = topic_worktree.smartlog()?;
+        assert!(stdout.contains("(ᐅ topic-wt)"), "stdout was: {stdout}");
+        assert!(stdout.contains("(> topic)"), "stdout was: {stdout}");
+    }
+
+    {
+        let (stdout, stderr) = git.branchless("sync", &["-t"])?;
+        assert!(
+            stderr.contains("Switched to branch 'topic'"),
+            "stderr was: {stderr}"
+        );
+        assert!(
+            stdout.contains("Synced ") && stdout.contains("create topic.txt"),
+            "stdout was: {stdout}"
+        );
+    }
+
+    {
+        let (master_oid, _stderr) = git.run(&["rev-parse", "master"])?;
+        let (topic_parent_oid, _stderr) = topic_worktree.run(&["rev-parse", "topic^"])?;
+        let (topic_oid, _stderr) = topic_worktree.run(&["rev-parse", "topic"])?;
+
+        assert_eq!(master_oid.trim(), topic_parent_oid.trim());
+        assert_ne!(original_topic_oid.to_string(), topic_oid.trim());
     }
 
     Ok(())
