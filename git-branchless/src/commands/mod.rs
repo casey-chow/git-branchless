@@ -221,6 +221,8 @@ fn command_main(ctx: CommandContext, opts: Opts) -> EyreExitOr<()> {
             )?
         }
 
+        Command::StackComment(args) => git_branchless_submit::github::stack_comment(ctx, args)?,
+
         Command::Submit(args) => git_branchless_submit::command_main(ctx, args)?,
 
         Command::Sync {

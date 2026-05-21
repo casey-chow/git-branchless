@@ -444,6 +444,22 @@ pub struct SubmitArgs {
     pub dry_run: bool,
 }
 
+/// Add GitHub comments to pull requests in a stack to help navigate between them.
+#[derive(Debug, Parser)]
+pub struct StackCommentArgs {
+    /// The commits whose stacks should receive navigation comments.
+    #[clap(value_parser, default_value = "stack()")]
+    pub revsets: Vec<Revset>,
+
+    /// Options for resolving revset expressions.
+    #[clap(flatten)]
+    pub resolve_revset_options: ResolveRevsetOptions,
+
+    /// Don't create or update comments. Instead, report what would be changed.
+    #[clap(short = 'n', long = "dry-run")]
+    pub dry_run: bool,
+}
+
 /// Run a command on each commit in a given set and aggregate the results.
 #[derive(Debug, Parser)]
 pub struct TestArgs {
@@ -702,6 +718,9 @@ pub enum Command {
         #[clap(flatten)]
         move_options: MoveOptions,
     },
+
+    /// Add GitHub comments to pull requests in a stack to help navigate between them.
+    StackComment(StackCommentArgs),
 
     /// Push commits to a remote.
     Submit(SubmitArgs),

@@ -1,6 +1,6 @@
 //! GitHub backend for submitting patch stacks.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::fmt::{Debug, Write};
 use std::hash::Hash;
@@ -10,11 +10,13 @@ use cursive_core::utils::markup::StyledString;
 use indexmap::IndexMap;
 use itertools::Itertools;
 use lib::core::config::get_main_branch_name;
-use lib::core::dag::CommitSet;
 use lib::core::dag::Dag;
+use lib::core::dag::{CommitSet, union_all};
 use lib::core::effects::Effects;
 use lib::core::effects::OperationType;
 use lib::core::eventlog::EventLogDb;
+use lib::core::eventlog::EventReplayer;
+use lib::core::formatting::Pluralize;
 use lib::core::repo_ext::RepoExt;
 use lib::core::repo_ext::RepoReferencesSnapshot;
 use lib::git::CategorizedReferenceName;
@@ -27,6 +29,9 @@ use lib::try_exit_code;
 use lib::util::ExitCode;
 use lib::util::EyreExitOr;
 
+use git_branchless_invoke::CommandContext;
+use git_branchless_opts::StackCommentArgs;
+use git_branchless_revset::resolve_commits;
 use tracing::debug;
 use tracing::instrument;
 use tracing::warn;
@@ -34,6 +39,8 @@ use tracing::warn;
 use crate::SubmitStatus;
 use crate::branch_forge::BranchForge;
 use crate::{CommitStatus, CreateStatus, Forge, SubmitOptions};
+
+const STACK_COMMENT_MARKER: &str = "<!-- git-branchless-stack-comment -->";
 
 /// Testing environment variable. When this is set, the executable will use the
 /// mock Github implementation. This should be set to the path of an existing
@@ -101,6 +108,190 @@ pub fn github_push_remote(repo: &Repo) -> eyre::Result<Option<String>> {
         }
     }
     Ok(None)
+}
+
+fn make_stack_comment_body(
+    stack_pull_request_infos: &IndexMap<NonZeroOid, client::PullRequestInfo>,
+    current_pull_request_number: usize,
+) -> String {
+    fn escape_markdown_link_text(s: &str) -> String {
+        s.replace('\\', "\\\\")
+            .replace('[', "\\[")
+            .replace(']', "\\]")
+    }
+
+    let pull_request_infos = stack_pull_request_infos.values().collect_vec();
+    let current_index = pull_request_infos
+        .iter()
+        .position(|info| info.number == current_pull_request_number);
+
+    let previous_link = current_index
+        .and_then(|index| index.checked_sub(1))
+        .map(|index| format!("[Previous]({})", pull_request_infos[index].url))
+        .unwrap_or_else(|| "Previous".to_string());
+    let next_link = current_index
+        .and_then(|index| pull_request_infos.get(index + 1))
+        .map(|info| format!("[Next]({})", info.url))
+        .unwrap_or_else(|| "Next".to_string());
+
+    let mut stack_list = String::new();
+    for (index, pull_request_info) in pull_request_infos.iter().enumerate() {
+        let title = escape_markdown_link_text(&pull_request_info.title);
+        let url = &pull_request_info.url;
+        if pull_request_info.number == current_pull_request_number {
+            writeln!(stack_list, "{}. **[{title}]({url})**", index + 1)
+                .expect("Writing to string should succeed");
+        } else {
+            writeln!(stack_list, "{}. [{title}]({url})", index + 1)
+                .expect("Writing to string should succeed");
+        }
+    }
+
+    format!(
+        "\
+{STACK_COMMENT_MARKER}
+**Stack navigation**
+
+{previous_link} | {next_link}
+
+{stack_list}"
+    )
+}
+
+/// Add GitHub comments to pull requests in a stack to help navigate between them.
+pub fn stack_comment(ctx: CommandContext, args: StackCommentArgs) -> EyreExitOr<()> {
+    let CommandContext {
+        effects,
+        git_run_info,
+    } = ctx;
+    let StackCommentArgs {
+        revsets,
+        resolve_revset_options,
+        dry_run,
+    } = args;
+
+    let repo = Repo::from_current_dir()?;
+    let conn = repo.get_db_conn()?;
+    let event_log_db = EventLogDb::new(&conn)?;
+    let event_replayer = EventReplayer::from_event_log_db(&effects, &repo, &event_log_db)?;
+    let event_cursor = event_replayer.make_default_cursor();
+    let references_snapshot = repo.get_references_snapshot()?;
+    let mut dag = Dag::open_and_sync(
+        &effects,
+        &repo,
+        &event_replayer,
+        event_cursor,
+        &references_snapshot,
+    )?;
+
+    let commit_set =
+        match resolve_commits(&effects, &repo, &mut dag, &revsets, &resolve_revset_options) {
+            Ok(commit_sets) => union_all(&commit_sets),
+            Err(err) => {
+                err.describe(&effects)?;
+                return Ok(Err(ExitCode(1)));
+            }
+        };
+
+    let github_forge = GithubForge {
+        effects: &effects,
+        git_run_info: &git_run_info,
+        repo: &repo,
+        event_log_db: &event_log_db,
+        dag: &dag,
+        client: GithubForge::client(git_run_info.clone()),
+    };
+    let pull_request_infos = try_exit_code!(
+        github_forge
+            .client
+            .query_repo_pull_request_infos(&effects)?
+    );
+
+    let mut seen_stack_keys = BTreeSet::new();
+    let mut changed_pull_request_numbers = BTreeSet::new();
+    for commit_oid in dag.sort(&commit_set)? {
+        let stack_pull_request_infos = github_forge.pull_request_infos_for_stack(
+            &references_snapshot,
+            &pull_request_infos,
+            commit_oid,
+        )?;
+        let stack_pull_request_infos: IndexMap<_, _> = stack_pull_request_infos
+            .into_iter()
+            .filter(|(_commit_oid, pull_request_info)| !pull_request_info.closed)
+            .collect();
+        if stack_pull_request_infos.is_empty() {
+            continue;
+        }
+
+        let stack_key = stack_pull_request_infos
+            .values()
+            .map(|pull_request_info| pull_request_info.number)
+            .collect_vec();
+        if !seen_stack_keys.insert(stack_key) {
+            continue;
+        }
+
+        for pull_request_info in stack_pull_request_infos.values() {
+            let body = make_stack_comment_body(&stack_pull_request_infos, pull_request_info.number);
+            let existing_comment = try_exit_code!(
+                github_forge
+                    .client
+                    .query_stack_comment(&effects, pull_request_info.number)?
+            );
+            if existing_comment
+                .as_ref()
+                .is_some_and(|comment| comment.body == body)
+            {
+                continue;
+            }
+
+            let action = if existing_comment.is_some() {
+                "Updating"
+            } else {
+                "Creating"
+            };
+            writeln!(
+                effects.get_output_stream(),
+                "{} stack navigation comment on pull request #{}",
+                if dry_run {
+                    format!("Would {}", action.to_lowercase())
+                } else {
+                    action.to_owned()
+                },
+                pull_request_info.number,
+            )?;
+
+            if !dry_run {
+                try_exit_code!(github_forge.client.upsert_stack_comment(
+                    &effects,
+                    pull_request_info.number,
+                    existing_comment.map(|comment| comment.id),
+                    &body,
+                )?);
+            }
+            changed_pull_request_numbers.insert(pull_request_info.number);
+        }
+    }
+
+    if changed_pull_request_numbers.is_empty() {
+        writeln!(
+            effects.get_output_stream(),
+            "No stack navigation comments needed updating.",
+        )?;
+    } else {
+        writeln!(
+            effects.get_output_stream(),
+            "{} stack navigation comments on {}.",
+            if dry_run { "Would update" } else { "Updated" },
+            Pluralize {
+                determiner: None,
+                amount: changed_pull_request_numbers.len(),
+                unit: ("pull request", "pull requests"),
+            },
+        )?;
+    }
+
+    Ok(Ok(()))
 }
 
 /// The [GitHub](https://en.wikipedia.org/wiki/GitHub) code hosting platform.
@@ -516,106 +707,124 @@ impl GithubForge<'_> {
     }
 
     #[instrument]
-    fn make_updated_pull_request_info(
+    fn pull_request_info_for_commit(
         &self,
-        effects: &Effects,
         references_snapshot: &RepoReferencesSnapshot,
         pull_request_infos: &HashMap<String, client::PullRequestInfo>,
         commit_oid: NonZeroOid,
-    ) -> EyreExitOr<client::UpdatePullRequestArgs> {
-        let mut stack_index = None;
-        let mut stack_pull_request_infos: IndexMap<NonZeroOid, &client::PullRequestInfo> =
-            Default::default();
+    ) -> eyre::Result<Option<client::PullRequestInfo>> {
+        let commit = self.repo.find_commit_or_fail(commit_oid)?; // for debug output
+
+        debug!(?commit, "Checking commit for pull request info");
+        let stack_branch_names = match references_snapshot.branch_oid_to_names.get(&commit_oid) {
+            Some(stack_branch_names) => stack_branch_names,
+            None => {
+                debug!(?commit, "Commit has no associated branches");
+                return Ok(None);
+            }
+        };
+
+        // The commit should have at most one associated branch with a pull
+        // request.
+        for stack_branch_name in stack_branch_names.iter().sorted() {
+            let stack_local_branch = match self.repo.find_branch(
+                &CategorizedReferenceName::new(stack_branch_name).render_suffix(),
+                BranchType::Local,
+            )? {
+                Some(stack_local_branch) => stack_local_branch,
+                None => {
+                    debug!(
+                        ?commit,
+                        ?stack_branch_name,
+                        "Skipping branch with no local branch"
+                    );
+                    continue;
+                }
+            };
+
+            let stack_remote_branch_name =
+                match stack_local_branch.get_upstream_branch_name_without_push_remote_name()? {
+                    Some(stack_remote_branch_name) => stack_remote_branch_name,
+                    None => {
+                        debug!(
+                            ?commit,
+                            ?stack_local_branch,
+                            "Skipping local branch with no remote branch"
+                        );
+                        continue;
+                    }
+                };
+
+            let pull_request_info = match pull_request_infos.get(&stack_remote_branch_name) {
+                Some(pull_request_info) => pull_request_info,
+                None => {
+                    debug!(
+                        ?commit,
+                        ?stack_local_branch,
+                        ?stack_remote_branch_name,
+                        "Skipping remote branch with no pull request info"
+                    );
+                    continue;
+                }
+            };
+
+            debug!(
+                ?commit,
+                ?pull_request_info,
+                "Found pull request info for commit"
+            );
+            return Ok(Some(pull_request_info.clone()));
+        }
+
+        debug!(
+            ?commit,
+            "Commit has no branches with associated pull request info"
+        );
+        Ok(None)
+    }
+
+    #[instrument]
+    fn pull_request_infos_for_stack(
+        &self,
+        references_snapshot: &RepoReferencesSnapshot,
+        pull_request_infos: &HashMap<String, client::PullRequestInfo>,
+        commit_oid: NonZeroOid,
+    ) -> eyre::Result<IndexMap<NonZeroOid, client::PullRequestInfo>> {
+        let mut stack_pull_request_infos = IndexMap::new();
 
         // Ensure we iterate over the stack in topological order so that the
         // stack indexes are correct.
         let stack_commit_oids = self
             .dag
             .sort(&self.dag.query_stack_commits(CommitSet::from(commit_oid))?)?;
-        let get_pull_request_info =
-            |commit_oid: NonZeroOid| -> eyre::Result<Option<&client::PullRequestInfo>> {
-                let commit = self.repo.find_commit_or_fail(commit_oid)?; // for debug output
-
-                debug!(?commit, "Checking commit for pull request info");
-                let stack_branch_names =
-                    match references_snapshot.branch_oid_to_names.get(&commit_oid) {
-                        Some(stack_branch_names) => stack_branch_names,
-                        None => {
-                            debug!(?commit, "Commit has no associated branches");
-                            return Ok(None);
-                        }
-                    };
-
-                // The commit should have at most one associated branch with a pull
-                // request.
-                for stack_branch_name in stack_branch_names.iter().sorted() {
-                    let stack_local_branch = match self.repo.find_branch(
-                        &CategorizedReferenceName::new(stack_branch_name).render_suffix(),
-                        BranchType::Local,
-                    )? {
-                        Some(stack_local_branch) => stack_local_branch,
-                        None => {
-                            debug!(
-                                ?commit,
-                                ?stack_branch_name,
-                                "Skipping branch with no local branch"
-                            );
-                            continue;
-                        }
-                    };
-
-                    let stack_remote_branch_name = match stack_local_branch
-                        .get_upstream_branch_name_without_push_remote_name()?
-                    {
-                        Some(stack_remote_branch_name) => stack_remote_branch_name,
-                        None => {
-                            debug!(
-                                ?commit,
-                                ?stack_local_branch,
-                                "Skipping local branch with no remote branch"
-                            );
-                            continue;
-                        }
-                    };
-
-                    let pull_request_info = match pull_request_infos.get(&stack_remote_branch_name)
-                    {
-                        Some(pull_request_info) => pull_request_info,
-                        None => {
-                            debug!(
-                                ?commit,
-                                ?stack_local_branch,
-                                ?stack_remote_branch_name,
-                                "Skipping remote branch with no pull request info"
-                            );
-                            continue;
-                        }
-                    };
-
-                    debug!(
-                        ?commit,
-                        ?pull_request_info,
-                        "Found pull request info for commit"
-                    );
-                    return Ok(Some(pull_request_info));
-                }
-
-                debug!(
-                    ?commit,
-                    "Commit has no branches with associated pull request info"
-                );
-                Ok(None)
-            };
         for stack_commit_oid in stack_commit_oids {
-            let pull_request_info = match get_pull_request_info(stack_commit_oid)? {
+            let pull_request_info = match self.pull_request_info_for_commit(
+                references_snapshot,
+                pull_request_infos,
+                stack_commit_oid,
+            )? {
                 Some(info) => info,
                 None => continue,
             };
             stack_pull_request_infos.insert(stack_commit_oid, pull_request_info);
-            if stack_commit_oid == commit_oid {
-                stack_index = Some(stack_pull_request_infos.len());
-            }
         }
+        Ok(stack_pull_request_infos)
+    }
+
+    #[instrument]
+    fn make_updated_pull_request_info(
+        &self,
+        _effects: &Effects,
+        references_snapshot: &RepoReferencesSnapshot,
+        pull_request_infos: &HashMap<String, client::PullRequestInfo>,
+        commit_oid: NonZeroOid,
+    ) -> EyreExitOr<client::UpdatePullRequestArgs> {
+        let stack_pull_request_infos =
+            self.pull_request_infos_for_stack(references_snapshot, pull_request_infos, commit_oid)?;
+        let stack_index = stack_pull_request_infos
+            .keys()
+            .position(|stack_commit_oid| *stack_commit_oid == commit_oid)
+            .map(|index| index + 1);
 
         let stack_size = stack_pull_request_infos.len();
         if stack_size == 0 {
@@ -676,7 +885,11 @@ impl GithubForge<'_> {
         let nearest_ancestor_with_pull_request_info = {
             let mut result = None;
             for stack_ancestor_oid in stack_ancestor_oids.into_iter().rev() {
-                if let Some(info) = get_pull_request_info(stack_ancestor_oid)? {
+                if let Some(info) = self.pull_request_info_for_commit(
+                    references_snapshot,
+                    pull_request_infos,
+                    stack_ancestor_oid,
+                )? {
                     result = Some(info);
                     break;
                 }
@@ -796,6 +1009,14 @@ mod client {
         }
     }
 
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    pub struct StackCommentInfo {
+        #[serde(rename = "id")]
+        pub id: usize,
+        #[serde(rename = "body")]
+        pub body: String,
+    }
+
     pub trait GithubClient: Debug {
         /// Get the username of the currently-logged-in user.
         fn query_github_username(&self, effects: &Effects) -> EyreExitOr<String>;
@@ -821,6 +1042,20 @@ mod client {
             number: usize,
             args: UpdatePullRequestArgs,
             submit_options: &super::SubmitOptions,
+        ) -> EyreExitOr<()>;
+
+        fn query_stack_comment(
+            &self,
+            effects: &Effects,
+            number: usize,
+        ) -> EyreExitOr<Option<StackCommentInfo>>;
+
+        fn upsert_stack_comment(
+            &self,
+            effects: &Effects,
+            number: usize,
+            comment_id: Option<usize>,
+            body: &str,
         ) -> EyreExitOr<()>;
     }
 
@@ -879,6 +1114,23 @@ mod client {
             body_file.write_all(body.as_bytes())?;
             body_file.flush()?;
             Ok(body_file)
+        }
+
+        #[instrument]
+        fn run_gh_with_body_file(
+            &self,
+            effects: &Effects,
+            args: Vec<String>,
+            body: &str,
+        ) -> EyreExitOr<Vec<u8>> {
+            let body_file = self.write_body_file(body)?;
+            let body_arg = format!("body=@{}", body_file.path().to_string_lossy());
+            let args = args
+                .iter()
+                .map(|arg| arg.as_str())
+                .chain([body_arg.as_str()])
+                .collect_vec();
+            self.run_gh(effects, &args)
         }
     }
 
@@ -1002,6 +1254,64 @@ mod client {
             )?);
             Ok(Ok(()))
         }
+
+        fn query_stack_comment(
+            &self,
+            effects: &Effects,
+            number: usize,
+        ) -> EyreExitOr<Option<StackCommentInfo>> {
+            let output = try_exit_code!(self.run_gh(
+                effects,
+                &[
+                    "api",
+                    &format!("repos/:owner/:repo/issues/{number}/comments?per_page=100"),
+                ],
+            )?);
+            let comments: Vec<StackCommentInfo> =
+                serde_json::from_slice(&output).wrap_err("Deserializing output from gh api")?;
+            let comment = comments
+                .into_iter()
+                .find(|comment| comment.body.contains(super::STACK_COMMENT_MARKER));
+            Ok(Ok(comment))
+        }
+
+        fn upsert_stack_comment(
+            &self,
+            effects: &Effects,
+            number: usize,
+            comment_id: Option<usize>,
+            body: &str,
+        ) -> EyreExitOr<()> {
+            match comment_id {
+                Some(comment_id) => {
+                    try_exit_code!(self.run_gh_with_body_file(
+                        effects,
+                        vec![
+                            "api".to_string(),
+                            "--method".to_string(),
+                            "PATCH".to_string(),
+                            format!("repos/:owner/:repo/issues/comments/{comment_id}"),
+                            "--field".to_string(),
+                        ],
+                        body,
+                    )?);
+                }
+                None => {
+                    try_exit_code!(self.run_gh_with_body_file(
+                        effects,
+                        vec![
+                            "api".to_string(),
+                            "--method".to_string(),
+                            "POST".to_string(),
+                            format!("repos/:owner/:repo/issues/{number}/comments"),
+                            "--field".to_string(),
+                        ],
+                        body,
+                    )?);
+                }
+            }
+            Ok(Ok(()))
+        }
     }
 
     /// The mock state on disk, representing the remote Github repository and
@@ -1011,9 +1321,21 @@ mod client {
         /// The next index to assign a newly-created pull request.
         pub pull_request_index: usize,
 
+        /// The next index to assign a newly-created comment.
+        #[serde(default, skip_serializing_if = "is_default")]
+        pub comment_index: usize,
+
         /// Information about all pull requests open for the repository. Sorted
         /// for determinism when dumping state for testing.
         pub pull_requests: BTreeMap<String, PullRequestInfo>,
+
+        /// Comments on pull requests, keyed by pull request number.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        pub comments: BTreeMap<usize, Vec<StackCommentInfo>>,
+    }
+
+    fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+        value == &T::default()
     }
 
     impl MockState {
@@ -1182,6 +1504,60 @@ mod client {
                 pull_request_info.base_ref_name = base_ref_name;
                 pull_request_info.title = title;
                 pull_request_info.body = body;
+                Ok(())
+            })?;
+            Ok(Ok(()))
+        }
+
+        fn query_stack_comment(
+            &self,
+            _effects: &Effects,
+            number: usize,
+        ) -> EyreExitOr<Option<StackCommentInfo>> {
+            let comment = self.with_state_mut(|state| {
+                let comment = state.comments.get(&number).and_then(|comments| {
+                    comments
+                        .iter()
+                        .find(|comment| comment.body.contains(super::STACK_COMMENT_MARKER))
+                        .cloned()
+                });
+                Ok(comment)
+            })?;
+            Ok(Ok(comment))
+        }
+
+        fn upsert_stack_comment(
+            &self,
+            _effects: &Effects,
+            number: usize,
+            comment_id: Option<usize>,
+            body: &str,
+        ) -> EyreExitOr<()> {
+            self.with_state_mut(|state| -> eyre::Result<()> {
+                match comment_id {
+                    Some(comment_id) => {
+                        let comment = state
+                            .comments
+                            .values_mut()
+                            .flat_map(|comments| comments.iter_mut())
+                            .find(|comment| comment.id == comment_id)
+                            .ok_or_else(|| {
+                                eyre::eyre!("Could not find comment with ID {comment_id}")
+                            })?;
+                        comment.body = body.to_owned();
+                    }
+                    None => {
+                        state.comment_index += 1;
+                        state
+                            .comments
+                            .entry(number)
+                            .or_default()
+                            .push(StackCommentInfo {
+                                id: state.comment_index,
+                                body: body.to_owned(),
+                            });
+                    }
+                }
                 Ok(())
             })?;
             Ok(Ok(()))
