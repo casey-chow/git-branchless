@@ -14,6 +14,8 @@ git-branchless-invoke = { workspace = true }
 git-branchless-opts = { workspace = true }
 git-branchless-revset = { workspace = true }
 lib = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

@@ -737,6 +737,9 @@ fn test_install_man_pages() -> eyre::Result<()> {
     git\-branchless\-smartlog(1)
     `smartlog` command
     .TP
+    git\-branchless\-supersmartlog(1)
+    Show the smartlog with GitHub pull request status information
+    .TP
     git\-branchless\-split(1)
     Split commits
     .TP

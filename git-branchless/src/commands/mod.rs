@@ -181,6 +181,10 @@ fn command_main(ctx: CommandContext, opts: Opts) -> EyreExitOr<()> {
 
         Command::Smartlog(args) => git_branchless_smartlog::command_main(ctx, args)?,
 
+        Command::Supersmartlog(args) => {
+            git_branchless_smartlog::supersmartlog_command_main(ctx, args)?
+        }
+
         Command::Snapshot { subcommand } => match subcommand {
             SnapshotSubcommand::Create => snapshot::create(&effects, &git_run_info)?,
             SnapshotSubcommand::Restore { snapshot_oid } => {

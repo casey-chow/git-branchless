@@ -680,6 +680,9 @@ pub enum Command {
     /// `smartlog` command.
     Smartlog(SmartlogArgs),
 
+    /// Show the smartlog with GitHub pull request status information.
+    Supersmartlog(SmartlogArgs),
+
     #[clap(hide = true)]
     /// Manage working copy snapshots.
     Snapshot {

@@ -13,9 +13,13 @@
 #![allow(clippy::too_many_arguments, clippy::blocks_in_conditions)]
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::fmt::Write;
+use std::process::Command;
 use std::time::SystemTime;
 
+use cursive_core::theme::BaseColor;
+use cursive_core::utils::markup::StyledString;
 use git_branchless_invoke::CommandContext;
 use git_branchless_opts::{Revset, SmartlogArgs};
 use lib::core::config::{
@@ -33,11 +37,13 @@ use lib::core::eventlog::{EventLogDb, EventReplayer};
 use lib::core::formatting::Pluralize;
 use lib::core::node_descriptors::{
     BranchesDescriptor, CommitMessageDescriptor, CommitOidDescriptor,
-    DifferentialRevisionDescriptor, ObsolescenceExplanationDescriptor, Redactor,
-    RelativeTimeDescriptor, WorktreeDescriptor,
+    DifferentialRevisionDescriptor, NodeDescriptor, NodeObject, ObsolescenceExplanationDescriptor,
+    Redactor, RelativeTimeDescriptor, WorktreeDescriptor,
 };
 use lib::core::worktree::get_linked_worktrees;
-use lib::git::{GitRunInfo, Repo};
+use lib::git::{GitRunInfo, NonZeroOid, Repo};
+use serde::Deserialize;
+use serde_json::Value;
 
 pub use graph::{SmartlogGraph, make_smartlog_graph};
 pub use render::{SmartlogOptions, render_graph};
@@ -757,12 +763,183 @@ mod render {
     }
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct PullRequestInfo {
+    #[serde(rename = "number")]
+    number: usize,
+
+    #[serde(rename = "headRefName")]
+    head_ref_name: String,
+
+    #[serde(rename = "state")]
+    state: String,
+
+    #[serde(rename = "isDraft")]
+    is_draft: bool,
+
+    #[serde(rename = "reviewDecision")]
+    review_decision: Option<String>,
+
+    #[serde(rename = "statusCheckRollup")]
+    status_check_rollup: Vec<Value>,
+}
+
+impl PullRequestInfo {
+    fn review_status(&self) -> &'static str {
+        if self.state != "OPEN" {
+            return "Closed";
+        }
+        if self.is_draft {
+            return "Draft";
+        }
+        match self.review_decision.as_deref() {
+            Some("APPROVED") => "Approved",
+            Some("CHANGES_REQUESTED") => "Changes Requested",
+            Some("REVIEW_REQUIRED") | None => "Unreviewed",
+            Some(_) => "Unreviewed",
+        }
+    }
+
+    fn check_status(&self) -> Option<&'static str> {
+        if self.status_check_rollup.is_empty() {
+            return None;
+        }
+
+        let mut saw_pending = false;
+        for check in &self.status_check_rollup {
+            let status = check.get("status").and_then(Value::as_str);
+            if status != Some("COMPLETED") {
+                saw_pending = true;
+                continue;
+            }
+            match check.get("conclusion").and_then(Value::as_str) {
+                Some("SUCCESS" | "SKIPPED" | "NEUTRAL") => {}
+                Some(_) => return Some("✗"),
+                None => saw_pending = true,
+            }
+        }
+        if saw_pending { None } else { Some("✓") }
+    }
+}
+
+#[derive(Debug)]
+struct GithubPullRequestDescriptor {
+    pull_request_infos_by_oid: HashMap<NonZeroOid, PullRequestInfo>,
+}
+
+impl GithubPullRequestDescriptor {
+    fn new(git_run_info: &GitRunInfo, repo: &Repo) -> eyre::Result<Self> {
+        let output = Command::new("gh")
+            .args([
+                "pr",
+                "list",
+                "--state",
+                "all",
+                "--author",
+                "@me",
+                "--limit",
+                "1000",
+                "--json",
+                "number,headRefName,state,isDraft,reviewDecision,statusCheckRollup",
+            ])
+            .current_dir(&git_run_info.working_directory)
+            .envs(&git_run_info.env)
+            .output()?;
+        if !output.status.success() {
+            eyre::bail!(
+                "Call to `gh pr list` failed:\nStdout:\n{}\nStderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+
+        let pull_request_infos: Vec<PullRequestInfo> = serde_json::from_slice(&output.stdout)?;
+        let pull_request_infos_by_head_ref_name: HashMap<String, PullRequestInfo> =
+            pull_request_infos
+                .into_iter()
+                .map(|info| (info.head_ref_name.clone(), info))
+                .collect();
+
+        let mut pull_request_infos_by_oid = HashMap::new();
+        for branch in repo.get_all_local_branches()? {
+            let local_branch_oid = match branch.get_oid()? {
+                Some(local_branch_oid) => local_branch_oid,
+                None => continue,
+            };
+            let remote_branch_name =
+                match branch.get_upstream_branch_name_without_push_remote_name()? {
+                    Some(remote_branch_name) => remote_branch_name,
+                    None => continue,
+                };
+            let pull_request_info =
+                match pull_request_infos_by_head_ref_name.get(&remote_branch_name) {
+                    Some(pull_request_info) => pull_request_info,
+                    None => continue,
+                };
+            pull_request_infos_by_oid.insert(local_branch_oid, pull_request_info.clone());
+        }
+
+        Ok(Self {
+            pull_request_infos_by_oid,
+        })
+    }
+}
+
+impl NodeDescriptor for GithubPullRequestDescriptor {
+    fn describe_node(
+        &mut self,
+        _glyphs: &lib::core::formatting::Glyphs,
+        object: &NodeObject,
+    ) -> eyre::Result<Option<StyledString>> {
+        let commit = match object {
+            NodeObject::Commit { commit } => commit,
+            NodeObject::GarbageCollected { oid: _ } => return Ok(None),
+        };
+        let pull_request_info = match self.pull_request_infos_by_oid.get(&commit.get_oid()) {
+            Some(pull_request_info) => pull_request_info,
+            None => return Ok(None),
+        };
+        let check_status = pull_request_info
+            .check_status()
+            .map(|status| format!(" {status}"))
+            .unwrap_or_default();
+        Ok(Some(StyledString::styled(
+            format!(
+                "#{} {}{}",
+                pull_request_info.number,
+                pull_request_info.review_status(),
+                check_status,
+            ),
+            BaseColor::Blue.light(),
+        )))
+    }
+}
+
 /// Display a nice graph of commits you've recently worked on.
 #[instrument]
 pub fn smartlog(
     effects: &Effects,
     git_run_info: &GitRunInfo,
     options: SmartlogOptions,
+) -> EyreExitOr<()> {
+    smartlog_impl(effects, git_run_info, options, false)
+}
+
+/// Display a nice graph of commits you've recently worked on, annotated with GitHub pull request information.
+#[instrument]
+pub fn supersmartlog(
+    effects: &Effects,
+    git_run_info: &GitRunInfo,
+    options: SmartlogOptions,
+) -> EyreExitOr<()> {
+    smartlog_impl(effects, git_run_info, options, true)
+}
+
+fn smartlog_impl(
+    effects: &Effects,
+    git_run_info: &GitRunInfo,
+    options: SmartlogOptions,
+    include_github_pull_requests: bool,
 ) -> EyreExitOr<()> {
     let SmartlogOptions {
         event_id,
@@ -851,30 +1028,57 @@ pub fn smartlog(
         get_smartlog_reverse(&repo)?
     };
 
+    let mut commit_oid_descriptor = CommitOidDescriptor::new(true)?;
+    let mut relative_time_descriptor = RelativeTimeDescriptor::new(&repo, SystemTime::now())?;
+    let mut obsolescence_explanation_descriptor = ObsolescenceExplanationDescriptor::new(
+        &event_replayer,
+        event_replayer.make_default_cursor(),
+    )?;
+    let mut branches_descriptor = BranchesDescriptor::new(
+        &repo,
+        &head_info,
+        &references_snapshot,
+        Some(&worktree_snapshot),
+        &Redactor::Disabled,
+    )?;
+    let mut worktree_descriptor = WorktreeDescriptor::new(&worktree_snapshot)?;
+    let mut differential_revision_descriptor =
+        DifferentialRevisionDescriptor::new(&repo, &Redactor::Disabled)?;
+    let mut github_pull_request_descriptor = if include_github_pull_requests {
+        match GithubPullRequestDescriptor::new(git_run_info, &repo) {
+            Ok(descriptor) => Some(descriptor),
+            Err(err) => {
+                writeln!(
+                    effects.get_error_stream(),
+                    "Could not query GitHub pull requests: {err}"
+                )?;
+                return Ok(Err(ExitCode(1)));
+            }
+        }
+    } else {
+        None
+    };
+    let mut commit_message_descriptor = CommitMessageDescriptor::new(&Redactor::Disabled)?;
+    let mut commit_descriptors: Vec<&mut dyn NodeDescriptor> = vec![
+        &mut commit_oid_descriptor,
+        &mut relative_time_descriptor,
+        &mut obsolescence_explanation_descriptor,
+        &mut branches_descriptor,
+        &mut worktree_descriptor,
+        &mut differential_revision_descriptor,
+    ];
+    if let Some(github_pull_request_descriptor) = github_pull_request_descriptor.as_mut() {
+        commit_descriptors.push(github_pull_request_descriptor);
+    }
+    commit_descriptors.push(&mut commit_message_descriptor);
+
     let mut lines = render_graph(
         &effects.reverse_order(reverse),
         &repo,
         &dag,
         &graph,
         references_snapshot.head_oid,
-        &mut [
-            &mut CommitOidDescriptor::new(true)?,
-            &mut RelativeTimeDescriptor::new(&repo, SystemTime::now())?,
-            &mut ObsolescenceExplanationDescriptor::new(
-                &event_replayer,
-                event_replayer.make_default_cursor(),
-            )?,
-            &mut BranchesDescriptor::new(
-                &repo,
-                &head_info,
-                &references_snapshot,
-                Some(&worktree_snapshot),
-                &Redactor::Disabled,
-            )?,
-            &mut WorktreeDescriptor::new(&worktree_snapshot)?,
-            &mut DifferentialRevisionDescriptor::new(&repo, &Redactor::Disabled)?,
-            &mut CommitMessageDescriptor::new(&Redactor::Disabled)?,
-        ],
+        &mut commit_descriptors,
     )?
     .into_iter();
     while let Some(line) = if reverse {
@@ -957,4 +1161,109 @@ pub fn command_main(ctx: CommandContext, args: SmartlogArgs) -> EyreExitOr<()> {
             exact,
         },
     )
+}
+
+/// `supersmartlog` command.
+#[instrument]
+pub fn supersmartlog_command_main(ctx: CommandContext, args: SmartlogArgs) -> EyreExitOr<()> {
+    let CommandContext {
+        effects,
+        git_run_info,
+    } = ctx;
+    let SmartlogArgs {
+        event_id,
+        revset,
+        resolve_revset_options,
+        reverse,
+        exact,
+    } = args;
+
+    supersmartlog(
+        &effects,
+        &git_run_info,
+        SmartlogOptions {
+            event_id,
+            revset,
+            resolve_revset_options,
+            reverse,
+            exact,
+        },
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::PullRequestInfo;
+
+    fn pull_request_info(
+        state: &str,
+        is_draft: bool,
+        review_decision: Option<&str>,
+        status_check_rollup: Vec<serde_json::Value>,
+    ) -> PullRequestInfo {
+        PullRequestInfo {
+            number: 123,
+            head_ref_name: "feature".to_string(),
+            state: state.to_string(),
+            is_draft,
+            review_decision: review_decision.map(str::to_string),
+            status_check_rollup,
+        }
+    }
+
+    #[test]
+    fn test_pull_request_review_status() {
+        assert_eq!(
+            pull_request_info("OPEN", false, Some("APPROVED"), vec![]).review_status(),
+            "Approved"
+        );
+        assert_eq!(
+            pull_request_info("OPEN", false, Some("REVIEW_REQUIRED"), vec![]).review_status(),
+            "Unreviewed"
+        );
+        assert_eq!(
+            pull_request_info("OPEN", true, Some("APPROVED"), vec![]).review_status(),
+            "Draft"
+        );
+        assert_eq!(
+            pull_request_info("CLOSED", false, Some("APPROVED"), vec![]).review_status(),
+            "Closed"
+        );
+    }
+
+    #[test]
+    fn test_pull_request_check_status() {
+        assert_eq!(
+            pull_request_info(
+                "OPEN",
+                false,
+                None,
+                vec![json!({"status": "COMPLETED", "conclusion": "SUCCESS"})],
+            )
+            .check_status(),
+            Some("✓")
+        );
+        assert_eq!(
+            pull_request_info(
+                "OPEN",
+                false,
+                None,
+                vec![json!({"status": "COMPLETED", "conclusion": "FAILURE"})],
+            )
+            .check_status(),
+            Some("✗")
+        );
+        assert_eq!(
+            pull_request_info(
+                "OPEN",
+                false,
+                None,
+                vec![json!({"status": "IN_PROGRESS", "conclusion": null})],
+            )
+            .check_status(),
+            None
+        );
+    }
 }
