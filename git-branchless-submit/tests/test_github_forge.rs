@@ -70,6 +70,127 @@ fn rebase_and_merge(remote_repo: &Git, branch_name: &str) -> eyre::Result<()> {
 }
 
 #[test]
+fn test_github_forge_stack_comment() -> eyre::Result<()> {
+    let GitWrapperWithRemoteRepo {
+        temp_dir: _temp_dir,
+        original_repo: remote_repo,
+        cloned_repo: local_repo,
+    } = make_git_with_remote_repo()?;
+    if remote_repo.get_version()? < MIN_VERSION {
+        return Ok(());
+    }
+
+    remote_repo.init_repo()?;
+    remote_repo.clone_repo_into(&local_repo, &[])?;
+
+    local_repo.detach_head()?;
+    local_repo.commit_file("test1", 1)?;
+    local_repo.commit_file("test2", 2)?;
+    local_repo.branchless_with_options(
+        "submit",
+        &["--create", "--forge", "github"],
+        &GitRunOptions {
+            env: mock_env(&remote_repo),
+            ..Default::default()
+        },
+    )?;
+
+    {
+        let (stdout, _stderr) = local_repo.branchless_with_options(
+            "stack-comment",
+            &[],
+            &GitRunOptions {
+                env: mock_env(&remote_repo),
+                ..Default::default()
+            },
+        )?;
+        insta::assert_snapshot!(stdout, @r###"
+        Creating stack navigation comment on pull request #1
+        Creating stack navigation comment on pull request #2
+        Updated stack navigation comments on 2 pull requests.
+        "###);
+    }
+    {
+        let state = dump_state(&local_repo, &remote_repo)?;
+        insta::assert_snapshot!(state, @r###"
+        Local state:
+        O f777ecc (master) create initial.txt
+        |
+        o 62fc20d (mock-github-username/create-test1-txt) create test1.txt
+        |
+        @ 96d1c37 (mock-github-username/create-test2-txt) create test2.txt
+
+
+        Remote state:
+        @ f777ecc (> master) create initial.txt
+        |
+        o 62fc20d (mock-github-username/create-test1-txt) create test1.txt
+        |
+        o 96d1c37 (mock-github-username/create-test2-txt) create test2.txt
+
+
+        Pull request info:
+        {
+          "pull_request_index": 2,
+          "comment_index": 2,
+          "pull_requests": {
+            "mock-github-username/create-test1-txt": {
+              "number": 1,
+              "url": "https://example.com/mock-github-username/mock-github-repo/pulls/1",
+              "headRefName": "mock-github-username/create-test1-txt",
+              "headRefOid": "62fc20d2a290daea0d52bdc2ed2ad4be6491010e",
+              "baseRefName": "master",
+              "closed": false,
+              "isDraft": false,
+              "title": "[1/2] create test1.txt",
+              "body": "**Stack:**\n\n* https://example.com/mock-github-username/mock-github-repo/pulls/1\n* https://example.com/mock-github-username/mock-github-repo/pulls/2\n\n\n---\n\ncreate test1.txt\n\n"
+            },
+            "mock-github-username/create-test2-txt": {
+              "number": 2,
+              "url": "https://example.com/mock-github-username/mock-github-repo/pulls/2",
+              "headRefName": "mock-github-username/create-test2-txt",
+              "headRefOid": "96d1c37a3d4363611c49f7e52186e189a04c531f",
+              "baseRefName": "mock-github-username/create-test1-txt",
+              "closed": false,
+              "isDraft": false,
+              "title": "[2/2] create test2.txt",
+              "body": "**Stack:**\n\n* https://example.com/mock-github-username/mock-github-repo/pulls/1\n* https://example.com/mock-github-username/mock-github-repo/pulls/2\n\n\n---\n\ncreate test2.txt\n\n"
+            }
+          },
+          "comments": {
+            "1": [
+              {
+                "id": 1,
+                "body": "<!-- git-branchless-stack-comment -->\n**Stack navigation**\n\nPrevious | [Next](https://example.com/mock-github-username/mock-github-repo/pulls/2)\n\n1. **[\\[1/2\\] create test1.txt](https://example.com/mock-github-username/mock-github-repo/pulls/1)**\n2. [\\[2/2\\] create test2.txt](https://example.com/mock-github-username/mock-github-repo/pulls/2)\n"
+              }
+            ],
+            "2": [
+              {
+                "id": 2,
+                "body": "<!-- git-branchless-stack-comment -->\n**Stack navigation**\n\n[Previous](https://example.com/mock-github-username/mock-github-repo/pulls/1) | Next\n\n1. [\\[1/2\\] create test1.txt](https://example.com/mock-github-username/mock-github-repo/pulls/1)\n2. **[\\[2/2\\] create test2.txt](https://example.com/mock-github-username/mock-github-repo/pulls/2)**\n"
+              }
+            ]
+          }
+        }
+        "###);
+    }
+    {
+        let (stdout, _stderr) = local_repo.branchless_with_options(
+            "stack-comment",
+            &[],
+            &GitRunOptions {
+                env: mock_env(&remote_repo),
+                ..Default::default()
+            },
+        )?;
+        insta::assert_snapshot!(stdout, @"No stack navigation comments needed updating.
+");
+    }
+
+    Ok(())
+}
+
+#[test]
 fn test_github_forge_reorder_commits() -> eyre::Result<()> {
     let GitWrapperWithRemoteRepo {
         temp_dir: _temp_dir,

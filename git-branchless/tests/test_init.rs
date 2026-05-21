@@ -740,6 +740,9 @@ fn test_install_man_pages() -> eyre::Result<()> {
     git\-branchless\-split(1)
     Split commits
     .TP
+    git\-branchless\-stack\-comment(1)
+    Add GitHub comments to pull requests in a stack to help navigate between them
+    .TP
     git\-branchless\-submit(1)
     Push commits to a remote
     .TP
