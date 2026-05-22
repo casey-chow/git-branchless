@@ -121,4 +121,7 @@ name = "test_sync"
 name = "test_undo"
 
 [[test]]
+name = "test_worktree"
+
+[[test]]
 name = "test_wrap"

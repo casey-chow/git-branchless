@@ -765,6 +765,9 @@ fn test_install_man_pages() -> eyre::Result<()> {
                 git\-branchless\-test(1)
                 Run a command on each commit in a given set and aggregate the results
                 .TP
+                git\-branchless\-worktree(1)
+                Manage linked worktrees
+                .TP
                 git\-branchless\-undo(1)
                 Browse or return to a previous state of the repository
                 .TP

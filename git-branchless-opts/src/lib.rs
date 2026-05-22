@@ -463,6 +463,50 @@ pub struct TestArgs {
     pub subcommand: TestSubcommand,
 }
 
+/// Arguments for worktree management.
+#[derive(Debug, Parser)]
+pub struct WorktreeArgs {
+    /// The subcommand to run.
+    #[clap(subcommand)]
+    pub subcommand: WorktreeSubcommand,
+}
+
+/// `worktree` subcommands.
+#[derive(Debug, Parser)]
+pub enum WorktreeSubcommand {
+    /// Create a new worktree.
+    Add {
+        /// Create a new branch-backed worktree by first creating the provided branch.
+        #[clap(value_parser, short = 'b', long = "branch")]
+        new_branch: Option<String>,
+
+        /// The worktree name to create under the configured worktree root.
+        #[clap(value_parser)]
+        name: String,
+
+        /// The branch, commit, or revset to materialize in the new worktree.
+        ///
+        /// When `-b/--branch` is set, this is treated as the optional start-point.
+        #[clap(value_parser)]
+        target: Option<Revset>,
+    },
+
+    /// Remove a worktree after verifying it is safe to do so.
+    Rm {
+        /// Remove the worktree even if it has unclean working tree state.
+        #[clap(action, short = 'f', long = "force")]
+        force: bool,
+
+        /// The branch or worktree path/name to remove.
+        #[clap(value_parser)]
+        target: Option<String>,
+    },
+
+    /// Show linked worktrees.
+    #[clap(visible_alias = "ls")]
+    List,
+}
+
 /// FIXME: write man-page text
 #[derive(Debug, Parser)]
 pub enum Command {
@@ -751,6 +795,9 @@ pub enum Command {
 
     /// Run a command on each commit in a given set and aggregate the results.
     Test(TestArgs),
+
+    /// Manage linked worktrees.
+    Worktree(WorktreeArgs),
 
     /// Browse or return to a previous state of the repository.
     Undo {
