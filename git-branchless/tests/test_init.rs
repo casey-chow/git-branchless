@@ -650,7 +650,7 @@ fn test_install_man_pages() -> eyre::Result<()> {
             .join("git-branchless.1"),
     )?;
     let man_page_contents = String::from_utf8_lossy(&man_page_contents);
-    insta::assert_snapshot!(man_page_contents, @r###"
+    insta::assert_snapshot!(man_page_contents, @r#"
     .ie \n(.g .ds Aq \(aq
     .el .ds Aq '
     .TH git-branchless 1  "git-branchless 0.10.0" 
@@ -737,6 +737,9 @@ fn test_install_man_pages() -> eyre::Result<()> {
     git\-branchless\-smartlog(1)
     `smartlog` command
     .TP
+    git\-branchless\-supersmartlog(1)
+    `supersmartlog` command
+    .TP
     git\-branchless\-split(1)
     Split commits
     .TP
@@ -767,6 +770,6 @@ fn test_install_man_pages() -> eyre::Result<()> {
     v0.10.0
     .SH AUTHORS
     Waleed Khan <me@waleedkhan.name>
-    "###);
+    "#);
     Ok(())
 }

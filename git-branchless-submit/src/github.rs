@@ -35,6 +35,21 @@ use crate::SubmitStatus;
 use crate::branch_forge::BranchForge;
 use crate::{CommitStatus, CreateStatus, Forge, SubmitOptions};
 
+pub use client::{PullRequestInfo, StatusCheck};
+
+/// Query GitHub (via the `gh` command-line tool) for the pull requests in the
+/// current repository authored by the current user, keyed by head branch name.
+///
+/// This performs a network request. It returns an [`ExitCode`] error if the
+/// query fails (e.g. `gh` is not installed, the user is not authenticated, or
+/// this is not a GitHub repository).
+pub fn query_pull_request_infos(
+    effects: &Effects,
+    git_run_info: &GitRunInfo,
+) -> EyreExitOr<HashMap<String, PullRequestInfo>> {
+    GithubForge::client(git_run_info.clone()).query_repo_pull_request_infos(effects)
+}
+
 /// Testing environment variable. When this is set, the executable will use the
 /// mock Github implementation. This should be set to the path of an existing
 /// repository that represents the remote/Github.
@@ -721,26 +736,66 @@ mod client {
 
     use crate::SubmitOptions;
 
+    /// Details of a GitHub pull request, as reported by `gh pr list`.
     #[derive(Clone, Debug, Deserialize, Serialize)]
     pub struct PullRequestInfo {
+        /// The pull request number, e.g. `123` for `#123`.
         #[serde(rename = "number")]
         pub number: usize,
+        /// The URL of the pull request.
         #[serde(rename = "url")]
         pub url: String,
+        /// The name of the head branch (the branch being merged from).
         #[serde(rename = "headRefName")]
         pub head_ref_name: String,
+        /// The OID of the head commit of the pull request.
         #[serde(rename = "headRefOid")]
         pub head_ref_oid: SerializedNonZeroOid,
+        /// The name of the base branch (the branch being merged into).
         #[serde(rename = "baseRefName")]
         pub base_ref_name: String,
+        /// Whether the pull request is closed (includes merged pull requests).
         #[serde(rename = "closed")]
         pub closed: bool,
+        /// Whether the pull request is a draft.
         #[serde(rename = "isDraft")]
         pub is_draft: bool,
+        /// The title of the pull request.
         #[serde(rename = "title")]
         pub title: String,
+        /// The body (description) of the pull request.
         #[serde(rename = "body")]
         pub body: String,
+        /// The high-level state of the pull request, as reported by GitHub:
+        /// `OPEN`, `CLOSED`, or `MERGED`. (Distinguishes merged from
+        /// otherwise-closed pull requests, which `closed` cannot.)
+        #[serde(rename = "state", default)]
+        pub state: String,
+        /// The review decision, as reported by GitHub: `APPROVED`,
+        /// `CHANGES_REQUESTED`, `REVIEW_REQUIRED`, or empty if not applicable.
+        #[serde(rename = "reviewDecision", default)]
+        pub review_decision: String,
+        /// The set of CI/status checks associated with the pull request's head
+        /// commit, used to compute a rolled-up pass/fail/pending status.
+        #[serde(rename = "statusCheckRollup", default)]
+        pub status_check_rollup: Vec<StatusCheck>,
+    }
+
+    /// A single entry in a pull request's `statusCheckRollup`. GitHub returns
+    /// either legacy commit statuses (which use `state`) or check runs (which
+    /// use `status` plus `conclusion`), so all fields are optional.
+    #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+    pub struct StatusCheck {
+        /// Commit-status state, e.g. `SUCCESS`, `FAILURE`, `PENDING`, `ERROR`.
+        #[serde(rename = "state", default)]
+        pub state: Option<String>,
+        /// Check-run status, e.g. `COMPLETED`, `IN_PROGRESS`, `QUEUED`.
+        #[serde(rename = "status", default)]
+        pub status: Option<String>,
+        /// Check-run conclusion once completed, e.g. `SUCCESS`, `FAILURE`,
+        /// `NEUTRAL`, `CANCELLED`.
+        #[serde(rename = "conclusion", default)]
+        pub conclusion: Option<String>,
     }
 
     #[derive(Debug)]
@@ -771,6 +826,9 @@ mod client {
                 is_draft: _,
                 title: old_title,
                 body: old_body,
+                state: _,
+                review_decision: _,
+                status_check_rollup: _,
             } = pull_request_info;
             let Self {
                 head_ref_oid: new_head_ref_oid,
@@ -909,7 +967,7 @@ mod client {
                     "--author",
                     "@me",
                     "--json",
-                    "number,url,headRefName,headRefOid,baseRefName,closed,isDraft,title,body",
+                    "number,url,headRefName,headRefOid,baseRefName,closed,isDraft,title,body,state,reviewDecision,statusCheckRollup",
                 ]
             )?);
             let pull_request_infos: Vec<PullRequestInfo> =
@@ -1067,6 +1125,7 @@ mod client {
                 let SerializedNonZeroOid(head_ref_oid) = pull_request_info.head_ref_oid;
                 if dag.query_is_ancestor(head_ref_oid, base_branch_oid)? {
                     pull_request_info.closed = true;
+                    pull_request_info.state = "MERGED".to_owned();
                 }
             }
             Ok(())
@@ -1147,6 +1206,9 @@ mod client {
                     is_draft: *draft,
                     title,
                     body,
+                    state: "OPEN".to_owned(),
+                    review_decision: String::new(),
+                    status_check_rollup: Vec::new(),
                 };
                 state.pull_requests.insert(head_ref_name, pull_request_info);
                 Ok(url)

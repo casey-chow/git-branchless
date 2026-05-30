@@ -378,6 +378,18 @@ pub struct SmartlogArgs {
     pub resolve_revset_options: ResolveRevsetOptions,
 }
 
+/// Like `smartlog`, but also annotate each commit with its associated GitHub
+/// pull-request status (number, open/closed/draft/merged state, review
+/// decision, and CI checks). This requires a network request to GitHub, which
+/// is why it is a separate command from `smartlog`.
+#[derive(Debug, Parser)]
+pub struct SupersmartlogArgs {
+    /// The arguments to the underlying smartlog. `supersmartlog` accepts the
+    /// same arguments as `smartlog`.
+    #[clap(flatten)]
+    pub smartlog_args: SmartlogArgs,
+}
+
 /// The Git hosting provider to use, called a "forge".
 #[derive(Clone, Debug, ValueEnum)]
 pub enum ForgeKind {
@@ -663,6 +675,9 @@ pub enum Command {
 
     /// `smartlog` command.
     Smartlog(SmartlogArgs),
+
+    /// `supersmartlog` command.
+    Supersmartlog(SupersmartlogArgs),
 
     #[clap(hide = true)]
     /// Manage working copy snapshots.

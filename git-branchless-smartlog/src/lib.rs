@@ -33,7 +33,7 @@ use lib::core::eventlog::{EventLogDb, EventReplayer};
 use lib::core::formatting::Pluralize;
 use lib::core::node_descriptors::{
     BranchesDescriptor, CommitMessageDescriptor, CommitOidDescriptor,
-    DifferentialRevisionDescriptor, ObsolescenceExplanationDescriptor, Redactor,
+    DifferentialRevisionDescriptor, NodeDescriptor, ObsolescenceExplanationDescriptor, Redactor,
     RelativeTimeDescriptor,
 };
 use lib::git::{GitRunInfo, Repo};
@@ -757,11 +757,12 @@ mod render {
 }
 
 /// Display a nice graph of commits you've recently worked on.
-#[instrument]
+#[instrument(skip(extra_descriptors))]
 pub fn smartlog(
     effects: &Effects,
     git_run_info: &GitRunInfo,
     options: SmartlogOptions,
+    extra_descriptors: &mut [&mut dyn NodeDescriptor],
 ) -> EyreExitOr<()> {
     let SmartlogOptions {
         event_id,
@@ -835,28 +836,42 @@ pub fn smartlog(
         get_smartlog_reverse(&repo)?
     };
 
+    let mut commit_oid_descriptor = CommitOidDescriptor::new(true)?;
+    let mut relative_time_descriptor = RelativeTimeDescriptor::new(&repo, SystemTime::now())?;
+    let mut obsolescence_descriptor = ObsolescenceExplanationDescriptor::new(
+        &event_replayer,
+        event_replayer.make_default_cursor(),
+    )?;
+    let mut branches_descriptor =
+        BranchesDescriptor::new(&repo, &head_info, &references_snapshot, &Redactor::Disabled)?;
+    let mut differential_revision_descriptor =
+        DifferentialRevisionDescriptor::new(&repo, &Redactor::Disabled)?;
+    let mut commit_message_descriptor = CommitMessageDescriptor::new(&Redactor::Disabled)?;
+
+    // Built-in descriptors, then any caller-supplied descriptors (e.g. the
+    // GitHub pull-request status shown by `supersmartlog`), then the commit
+    // message last so that it appears at the end of each line.
+    let mut descriptors: Vec<&mut dyn NodeDescriptor> = vec![
+        &mut commit_oid_descriptor,
+        &mut relative_time_descriptor,
+        &mut obsolescence_descriptor,
+        &mut branches_descriptor,
+        &mut differential_revision_descriptor,
+    ];
+    descriptors.extend(
+        extra_descriptors
+            .iter_mut()
+            .map(|descriptor| -> &mut dyn NodeDescriptor { &mut **descriptor }),
+    );
+    descriptors.push(&mut commit_message_descriptor);
+
     let mut lines = render_graph(
         &effects.reverse_order(reverse),
         &repo,
         &dag,
         &graph,
         references_snapshot.head_oid,
-        &mut [
-            &mut CommitOidDescriptor::new(true)?,
-            &mut RelativeTimeDescriptor::new(&repo, SystemTime::now())?,
-            &mut ObsolescenceExplanationDescriptor::new(
-                &event_replayer,
-                event_replayer.make_default_cursor(),
-            )?,
-            &mut BranchesDescriptor::new(
-                &repo,
-                &head_info,
-                &references_snapshot,
-                &Redactor::Disabled,
-            )?,
-            &mut DifferentialRevisionDescriptor::new(&repo, &Redactor::Disabled)?,
-            &mut CommitMessageDescriptor::new(&Redactor::Disabled)?,
-        ],
+        &mut descriptors,
     )?
     .into_iter();
     while let Some(line) = if reverse {
@@ -938,5 +953,6 @@ pub fn command_main(ctx: CommandContext, args: SmartlogArgs) -> EyreExitOr<()> {
             reverse,
             exact,
         },
+        &mut [],
     )
 }

@@ -1,0 +1,20 @@
+[package]
+description = "Supporting library for git-branchless"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+name = "git-branchless-supersmartlog"
+repository = "https://github.com/arxanas/git-branchless"
+version = "0.10.0"
+
+[dependencies]
+cursive_core = { workspace = true }
+eyre = { workspace = true }
+git-branchless-invoke = { workspace = true }
+git-branchless-opts = { workspace = true }
+git-branchless-smartlog = { workspace = true }
+git-branchless-submit = { workspace = true }
+lib = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }

@@ -109,7 +109,7 @@ fn test_github_forge_reorder_commits() -> eyre::Result<()> {
     }
     {
         let state = dump_state(&local_repo, &remote_repo)?;
-        insta::assert_snapshot!(state, @r###"
+        insta::assert_snapshot!(state, @r#"
         Local state:
         O f777ecc (master) create initial.txt
         |
@@ -139,7 +139,10 @@ fn test_github_forge_reorder_commits() -> eyre::Result<()> {
               "closed": false,
               "isDraft": false,
               "title": "[1/2] create test1.txt",
-              "body": "**Stack:**\n\n* https://example.com/mock-github-username/mock-github-repo/pulls/1\n* https://example.com/mock-github-username/mock-github-repo/pulls/2\n\n\n---\n\ncreate test1.txt\n\n"
+              "body": "**Stack:**\n\n* https://example.com/mock-github-username/mock-github-repo/pulls/1\n* https://example.com/mock-github-username/mock-github-repo/pulls/2\n\n\n---\n\ncreate test1.txt\n\n",
+              "state": "OPEN",
+              "reviewDecision": "",
+              "statusCheckRollup": []
             },
             "mock-github-username/create-test2-txt": {
               "number": 2,
@@ -150,11 +153,14 @@ fn test_github_forge_reorder_commits() -> eyre::Result<()> {
               "closed": false,
               "isDraft": false,
               "title": "[2/2] create test2.txt",
-              "body": "**Stack:**\n\n* https://example.com/mock-github-username/mock-github-repo/pulls/1\n* https://example.com/mock-github-username/mock-github-repo/pulls/2\n\n\n---\n\ncreate test2.txt\n\n"
+              "body": "**Stack:**\n\n* https://example.com/mock-github-username/mock-github-repo/pulls/1\n* https://example.com/mock-github-username/mock-github-repo/pulls/2\n\n\n---\n\ncreate test2.txt\n\n",
+              "state": "OPEN",
+              "reviewDecision": "",
+              "statusCheckRollup": []
             }
           }
         }
-        "###);
+        "#);
     }
 
     local_repo.branchless(
@@ -180,7 +186,7 @@ fn test_github_forge_reorder_commits() -> eyre::Result<()> {
     }
     {
         let state = dump_state(&local_repo, &remote_repo)?;
-        insta::assert_snapshot!(state, @r###"
+        insta::assert_snapshot!(state, @r#"
         Local state:
         O f777ecc (master) create initial.txt
         |
@@ -210,7 +216,10 @@ fn test_github_forge_reorder_commits() -> eyre::Result<()> {
               "closed": false,
               "isDraft": false,
               "title": "[2/2] create test1.txt",
-              "body": "**Stack:**\n\n* https://example.com/mock-github-username/mock-github-repo/pulls/2\n* https://example.com/mock-github-username/mock-github-repo/pulls/1\n\n\n---\n\ncreate test1.txt\n\n"
+              "body": "**Stack:**\n\n* https://example.com/mock-github-username/mock-github-repo/pulls/2\n* https://example.com/mock-github-username/mock-github-repo/pulls/1\n\n\n---\n\ncreate test1.txt\n\n",
+              "state": "OPEN",
+              "reviewDecision": "",
+              "statusCheckRollup": []
             },
             "mock-github-username/create-test2-txt": {
               "number": 2,
@@ -221,11 +230,14 @@ fn test_github_forge_reorder_commits() -> eyre::Result<()> {
               "closed": false,
               "isDraft": false,
               "title": "[1/2] create test2.txt",
-              "body": "**Stack:**\n\n* https://example.com/mock-github-username/mock-github-repo/pulls/2\n* https://example.com/mock-github-username/mock-github-repo/pulls/1\n\n\n---\n\ncreate test2.txt\n\n"
+              "body": "**Stack:**\n\n* https://example.com/mock-github-username/mock-github-repo/pulls/2\n* https://example.com/mock-github-username/mock-github-repo/pulls/1\n\n\n---\n\ncreate test2.txt\n\n",
+              "state": "OPEN",
+              "reviewDecision": "",
+              "statusCheckRollup": []
             }
           }
         }
-        "###);
+        "#);
     }
 
     Ok(())
@@ -272,7 +284,7 @@ fn test_github_forge_mock_client_closes_pull_requests() -> eyre::Result<()> {
     }
     {
         let state = dump_state(&local_repo, &remote_repo)?;
-        insta::assert_snapshot!(state, @r###"
+        insta::assert_snapshot!(state, @r#"
         Local state:
         O f777ecc (master) create initial.txt
         |
@@ -302,7 +314,10 @@ fn test_github_forge_mock_client_closes_pull_requests() -> eyre::Result<()> {
               "closed": false,
               "isDraft": false,
               "title": "[1/2] create test1.txt",
-              "body": "**Stack:**\n\n* https://example.com/mock-github-username/mock-github-repo/pulls/1\n* https://example.com/mock-github-username/mock-github-repo/pulls/2\n\n\n---\n\ncreate test1.txt\n\n"
+              "body": "**Stack:**\n\n* https://example.com/mock-github-username/mock-github-repo/pulls/1\n* https://example.com/mock-github-username/mock-github-repo/pulls/2\n\n\n---\n\ncreate test1.txt\n\n",
+              "state": "OPEN",
+              "reviewDecision": "",
+              "statusCheckRollup": []
             },
             "mock-github-username/create-test2-txt": {
               "number": 2,
@@ -313,11 +328,14 @@ fn test_github_forge_mock_client_closes_pull_requests() -> eyre::Result<()> {
               "closed": false,
               "isDraft": false,
               "title": "[2/2] create test2.txt",
-              "body": "**Stack:**\n\n* https://example.com/mock-github-username/mock-github-repo/pulls/1\n* https://example.com/mock-github-username/mock-github-repo/pulls/2\n\n\n---\n\ncreate test2.txt\n\n"
+              "body": "**Stack:**\n\n* https://example.com/mock-github-username/mock-github-repo/pulls/1\n* https://example.com/mock-github-username/mock-github-repo/pulls/2\n\n\n---\n\ncreate test2.txt\n\n",
+              "state": "OPEN",
+              "reviewDecision": "",
+              "statusCheckRollup": []
             }
           }
         }
-        "###);
+        "#);
     }
 
     rebase_and_merge(&remote_repo, "mock-github-username/create-test1-txt")?;
@@ -364,7 +382,7 @@ fn test_github_forge_mock_client_closes_pull_requests() -> eyre::Result<()> {
     }
     {
         let state = dump_state(&local_repo, &remote_repo)?;
-        insta::assert_snapshot!(state, @r###"
+        insta::assert_snapshot!(state, @r#"
         Local state:
         :
         O 047b7ad (master) create test1.txt
@@ -392,7 +410,10 @@ fn test_github_forge_mock_client_closes_pull_requests() -> eyre::Result<()> {
               "closed": true,
               "isDraft": false,
               "title": "[1/2] create test1.txt",
-              "body": "**Stack:**\n\n* https://example.com/mock-github-username/mock-github-repo/pulls/1\n* https://example.com/mock-github-username/mock-github-repo/pulls/2\n\n\n---\n\ncreate test1.txt\n\n"
+              "body": "**Stack:**\n\n* https://example.com/mock-github-username/mock-github-repo/pulls/1\n* https://example.com/mock-github-username/mock-github-repo/pulls/2\n\n\n---\n\ncreate test1.txt\n\n",
+              "state": "MERGED",
+              "reviewDecision": "",
+              "statusCheckRollup": []
             },
             "mock-github-username/create-test2-txt": {
               "number": 2,
@@ -403,11 +424,14 @@ fn test_github_forge_mock_client_closes_pull_requests() -> eyre::Result<()> {
               "closed": false,
               "isDraft": false,
               "title": "[1/1] create test2.txt",
-              "body": "**Stack:**\n\n* https://example.com/mock-github-username/mock-github-repo/pulls/2\n\n\n---\n\ncreate test2.txt\n\n"
+              "body": "**Stack:**\n\n* https://example.com/mock-github-username/mock-github-repo/pulls/2\n\n\n---\n\ncreate test2.txt\n\n",
+              "state": "OPEN",
+              "reviewDecision": "",
+              "statusCheckRollup": []
             }
           }
         }
-        "###);
+        "#);
     }
 
     Ok(())
@@ -463,7 +487,7 @@ fn test_github_forge_no_include_unsubmitted_commits_in_stack() -> eyre::Result<(
     }
     {
         let state = dump_state(&local_repo, &remote_repo)?;
-        insta::assert_snapshot!(state, @r###"
+        insta::assert_snapshot!(state, @r#"
         Local state:
         O f777ecc (master) create initial.txt
         |
@@ -493,11 +517,14 @@ fn test_github_forge_no_include_unsubmitted_commits_in_stack() -> eyre::Result<(
               "closed": false,
               "isDraft": false,
               "title": "[1/1] create test1.txt",
-              "body": "**Stack:**\n\n* https://example.com/mock-github-username/mock-github-repo/pulls/1\n\n\n---\n\ncreate test1.txt\n\n"
+              "body": "**Stack:**\n\n* https://example.com/mock-github-username/mock-github-repo/pulls/1\n\n\n---\n\ncreate test1.txt\n\n",
+              "state": "OPEN",
+              "reviewDecision": "",
+              "statusCheckRollup": []
             }
           }
         }
-        "###);
+        "#);
     }
 
     Ok(())
@@ -553,7 +580,7 @@ fn test_github_forge_multiple_commits_in_pull_request() -> eyre::Result<()> {
     }
     {
         let state = dump_state(&local_repo, &remote_repo)?;
-        insta::assert_snapshot!(state, @r###"
+        insta::assert_snapshot!(state, @r#"
         Local state:
         O f777ecc (master) create initial.txt
         |
@@ -587,11 +614,14 @@ fn test_github_forge_multiple_commits_in_pull_request() -> eyre::Result<()> {
               "closed": false,
               "isDraft": false,
               "title": "[1/1] create test3.txt",
-              "body": "**Stack:**\n\n* https://example.com/mock-github-username/mock-github-repo/pulls/1\n\n\n---\n\ncreate test3.txt\n\n"
+              "body": "**Stack:**\n\n* https://example.com/mock-github-username/mock-github-repo/pulls/1\n\n\n---\n\ncreate test3.txt\n\n",
+              "state": "OPEN",
+              "reviewDecision": "",
+              "statusCheckRollup": []
             }
           }
         }
-        "###);
+        "#);
     }
 
     Ok(())

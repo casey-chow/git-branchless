@@ -244,6 +244,13 @@ pub fn get_commit_descriptors_differential_revision(repo: &Repo) -> eyre::Result
         .get_or("branchless.commitDescriptors.differentialRevision", true)
 }
 
+/// If `true`, show GitHub pull-request status in the supersmartlog.
+#[instrument]
+pub fn get_commit_descriptors_github_status(repo: &Repo) -> eyre::Result<bool> {
+    repo.get_readonly_config()?
+        .get_or("branchless.commitDescriptors.githubStatus", true)
+}
+
 /// If `true`, show the age of each commit in the smartlog.
 #[instrument]
 pub fn get_commit_descriptors_relative_time(repo: &Repo) -> eyre::Result<bool> {

@@ -363,5 +363,5 @@ pub fn restack(
         &execute_options,
     )?);
 
-    smartlog(effects, git_run_info, Default::default())
+    smartlog(effects, git_run_info, Default::default(), &mut [])
 }

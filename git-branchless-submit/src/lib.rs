@@ -13,6 +13,8 @@ mod branch_forge;
 pub mod github;
 pub mod phabricator;
 
+pub use github::{PullRequestInfo, StatusCheck};
+
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::{Debug, Write};
 use std::time::SystemTime;

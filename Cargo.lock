@@ -1498,6 +1498,7 @@ dependencies = [
  "git-branchless-reword",
  "git-branchless-smartlog",
  "git-branchless-submit",
+ "git-branchless-supersmartlog",
  "git-branchless-test",
  "git-branchless-undo",
  "insta",
@@ -1767,6 +1768,21 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
+name = "git-branchless-supersmartlog"
+version = "0.10.0"
+dependencies = [
+ "cursive_core 0.4.6",
+ "eyre",
+ "git-branchless-invoke",
+ "git-branchless-lib",
+ "git-branchless-opts",
+ "git-branchless-smartlog",
+ "git-branchless-submit",
+ "insta",
  "tracing",
 ]
 

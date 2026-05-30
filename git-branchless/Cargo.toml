@@ -37,6 +37,7 @@ git-branchless-revset = { workspace = true }
 git-branchless-reword = { workspace = true }
 git-branchless-smartlog = { workspace = true }
 git-branchless-submit = { workspace = true }
+git-branchless-supersmartlog = { workspace = true }
 git-branchless-test = { workspace = true }
 git-branchless-undo = { workspace = true }
 itertools = { workspace = true }
